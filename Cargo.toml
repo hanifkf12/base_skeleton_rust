@@ -11,6 +11,9 @@ axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 dotenvy = "0.15"
+opentelemetry = { version = "0.31", features = ["trace"] }
+opentelemetry-otlp = { version = "0.31", features = ["http-proto", "reqwest-client", "tls-roots", "trace"] }
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "trace"] }
 redis = { version = "0.32", features = ["connection-manager", "tokio-comp"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -20,7 +23,8 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["request-id", "sensitive-headers", "timeout", "trace"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-opentelemetry = "0.32"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]

@@ -151,12 +151,13 @@ impl UserRegistrationRepository for PostgresUserRepository {
         .map_err(map_sqlx_error)?;
 
         sqlx::query(
-            r#"INSERT INTO background_jobs (id, job_type, payload, max_attempts)
-               VALUES ($1, $2, $3, $4)"#,
+            r#"INSERT INTO background_jobs (id, job_type, payload, trace_context, max_attempts)
+               VALUES ($1, $2, $3, $4, $5)"#,
         )
         .bind(job.id)
         .bind(&job.job_type)
         .bind(&job.payload)
+        .bind(&job.trace_context)
         .bind(max_attempts)
         .execute(&mut *transaction)
         .await

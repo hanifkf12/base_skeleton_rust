@@ -782,6 +782,9 @@ The queue provides at-least-once processing, not exactly-once processing. A work
 migrations/0003_create_background_jobs.sql
     Database schema, constraints, and queue indexes
 
+migrations/0004_add_background_job_trace_context.sql
+    Durable W3C trace context for asynchronous trace continuation
+
 src/application/job/
     Queue models and ports, handler contract, retry orchestration
 
@@ -802,6 +805,12 @@ src/cli.rs and src/main.rs
 ```
 
 The worker is an inbound adapter like HTTP presentation: it receives work from an external boundary and invokes application behavior. SQL claiming remains in infrastructure because it is PostgreSQL-specific.
+
+### Distributed tracing and logs
+
+`src/telemetry/mod.rs` configures JSON logs on stdout and optional OTLP trace export. Set `OTEL_EXPORTER_OTLP_ENDPOINT` to enable the exporter and `OTEL_SERVICE_NAME` to name the service in SigNoz. For SigNoz Cloud, set `OTEL_EXPORTER_OTLP_HEADERS` to `signoz-ingestion-key=<key>`.
+
+HTTP spans extract W3C `traceparent` and `tracestate` headers. When a use case creates a durable job, it saves the current W3C context in `background_jobs.trace_context`. `JobWorker` extracts that context and makes the handler execution a consumer span, preserving the parent trace across the database boundary. Keep job payloads, credentials, cookies, and request bodies out of span fields and logs.
 
 ### Job lifecycle
 

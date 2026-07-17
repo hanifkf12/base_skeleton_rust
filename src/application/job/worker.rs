@@ -1,5 +1,7 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use tracing::Instrument;
+
 use super::{JobDisposition, JobHandler, JobQueue, JobQueueError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,13 +54,17 @@ impl JobWorker {
             return Ok(RunOutcome::Idle);
         };
 
-        let result = match self.handlers.get(job.job_type.as_str()) {
-            Some(handler) => handler.handle(&job).await,
-            None => Err(super::JobHandlerError::new(format!(
-                "no handler is registered for job type {}",
-                job.job_type
-            ))),
-        };
+        let result = async {
+            match self.handlers.get(job.job_type.as_str()) {
+                Some(handler) => handler.handle(&job).await,
+                None => Err(super::JobHandlerError::new(format!(
+                    "no handler is registered for job type {}",
+                    job.job_type
+                ))),
+            }
+        }
+        .instrument(crate::telemetry::job_span(&job))
+        .await;
 
         match result {
             Ok(()) => {

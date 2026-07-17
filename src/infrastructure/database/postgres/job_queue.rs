@@ -22,6 +22,7 @@ struct ClaimedJobRow {
     id: Uuid,
     job_type: String,
     payload: Value,
+    trace_context: Value,
     attempts: i32,
     max_attempts: i32,
 }
@@ -41,6 +42,7 @@ impl ClaimedJobRow {
             id: self.id,
             job_type: self.job_type,
             payload: self.payload,
+            trace_context: self.trace_context,
             attempts,
             max_attempts,
         })
@@ -57,12 +59,13 @@ impl JobQueue for PostgresJobQueue {
     async fn enqueue(&self, job: &NewJob) -> Result<(), JobQueueError> {
         let max_attempts = max_attempts(job.max_attempts)?;
         sqlx::query(
-            r#"INSERT INTO background_jobs (id, job_type, payload, max_attempts)
-               VALUES ($1, $2, $3, $4)"#,
+            r#"INSERT INTO background_jobs (id, job_type, payload, trace_context, max_attempts)
+               VALUES ($1, $2, $3, $4, $5)"#,
         )
         .bind(job.id)
         .bind(&job.job_type)
         .bind(&job.payload)
+        .bind(&job.trace_context)
         .bind(max_attempts)
         .execute(&self.pool)
         .await
@@ -118,7 +121,7 @@ impl JobQueue for PostgresJobQueue {
                    updated_at = NOW()
                FROM candidate
                WHERE jobs.id = candidate.id
-               RETURNING jobs.id, jobs.job_type, jobs.payload,
+               RETURNING jobs.id, jobs.job_type, jobs.payload, jobs.trace_context,
                          jobs.attempts, jobs.max_attempts"#,
         )
         .bind(worker_id)

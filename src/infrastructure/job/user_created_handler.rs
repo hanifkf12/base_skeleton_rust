@@ -45,6 +45,7 @@ mod tests {
             id: Uuid::new_v4(),
             job_type: USER_CREATED_JOB.to_owned(),
             payload,
+            trace_context: serde_json::json!({}),
             attempts: 1,
             max_attempts: 5,
         }

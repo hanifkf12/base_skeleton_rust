@@ -27,6 +27,7 @@ impl JobQueue for FakeQueue {
             id: job.id,
             job_type: job.job_type.clone(),
             payload: job.payload.clone(),
+            trace_context: job.trace_context.clone(),
             attempts: 1,
             max_attempts: job.max_attempts,
         });
@@ -76,6 +77,7 @@ fn claimed_job(job_type: &str, attempts: u32) -> ClaimedJob {
         id: Uuid::new_v4(),
         job_type: job_type.to_owned(),
         payload: json!({}),
+        trace_context: json!({}),
         attempts,
         max_attempts: 5,
     }

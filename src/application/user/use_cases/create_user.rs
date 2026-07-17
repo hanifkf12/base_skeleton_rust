@@ -42,7 +42,8 @@ impl CreateUserUseCase {
                 "user_id": user.id().to_string(),
             }),
             self.job_max_attempts,
-        );
+        )
+        .with_trace_context(crate::telemetry::current_trace_context());
         let created = self.repository.create_with_job(&user, &job).await?;
         let _ = self.cache.set(&created, self.cache_ttl_seconds).await;
         Ok(created)

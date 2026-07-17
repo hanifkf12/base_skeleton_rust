@@ -116,6 +116,23 @@ See `ARCHITECTURE.md` for the job lifecycle and the step-by-step guide for addin
 
 Every response includes an `x-request-id`. Authorization and cookie headers are marked sensitive in traces, request bodies are limited by `MAX_REQUEST_BODY_BYTES`, and requests are bounded by `REQUEST_TIMEOUT_SECONDS`.
 
+## Observability with SigNoz
+
+Logs are structured JSON on stdout. Within HTTP and job spans they include `trace_id` and `span_id` fields for SigNoz log/trace correlation; configure your SigNoz OpenTelemetry Collector (or its Kubernetes/Docker agent) to collect container stdout as logs. Trace export is opt-in so local development works without a collector:
+
+```bash
+# Self-hosted SigNoz OTLP/HTTP
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+OTEL_SERVICE_NAME=base-skeleton-rust
+
+# SigNoz Cloud also needs its ingestion header
+OTEL_EXPORTER_OTLP_HEADERS=signoz-ingestion-key=your-ingestion-key
+```
+
+The service accepts W3C `traceparent` and `tracestate` headers, exports HTTP spans through OTLP, and stores the resulting trace context with every durable job. The worker restores that context before handling the job, so an HTTP request and its asynchronous work appear in one distributed trace. Job payloads, authorization headers, cookies, and request bodies are never added to spans.
+
+For self-hosted deployments, OTLP/HTTP is normally exposed on port `4318`; use the regional ingest endpoint supplied by SigNoz Cloud for cloud deployments. See the [SigNoz Rust instrumentation guide](https://signoz.io/docs/instrumentation/opentelemetry-rust/) and [self-hosted ingestion overview](https://signoz.io/docs/ingestion/self-hosted/overview/).
+
 ## Checks
 
 ```bash

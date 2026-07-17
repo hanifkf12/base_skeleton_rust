@@ -15,7 +15,9 @@ async fn exercises_the_postgres_job_lifecycle_when_a_test_database_is_configured
     sqlx::migrate!().run(&pool).await.unwrap();
 
     let queue = PostgresJobQueue::new(pool.clone());
-    let job = NewJob::new("test.lifecycle", json!({ "value": 42 }), 2);
+    let job = NewJob::new("test.lifecycle", json!({ "value": 42 }), 2).with_trace_context(
+        json!({ "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" }),
+    );
     queue.enqueue(&job).await.unwrap();
 
     let first_attempt = queue
@@ -25,6 +27,7 @@ async fn exercises_the_postgres_job_lifecycle_when_a_test_database_is_configured
         .unwrap();
     assert_eq!(first_attempt.id, job.id);
     assert_eq!(first_attempt.attempts, 1);
+    assert_eq!(first_attempt.trace_context, job.trace_context);
     assert_eq!(
         queue
             .fail(job.id, "test-worker", "temporary failure", Duration::ZERO,)
