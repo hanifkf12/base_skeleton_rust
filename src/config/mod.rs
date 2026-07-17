@@ -96,6 +96,10 @@ impl Config {
             job_worker_id: optional("JOB_WORKER_ID")?,
         })
     }
+
+    pub fn migration_database_url_from_env() -> Result<String> {
+        optional("MIGRATION_DATABASE_URL")?.map_or_else(|| required("DATABASE_URL"), Ok)
+    }
 }
 
 fn required(name: &str) -> Result<String> {

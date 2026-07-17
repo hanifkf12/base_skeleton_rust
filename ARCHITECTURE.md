@@ -173,9 +173,10 @@ Location: `src/bootstrap`
 
 Bootstrap is the composition root. It is responsible for:
 
-- Loading configuration.
+- Selecting the runtime mode from the unified CLI.
+- Loading and validating configuration required by that mode.
 - Creating the PostgreSQL connection pool.
-- Running database migrations.
+- Running migrations only for explicit database commands.
 - Creating the Redis connection manager when Redis is configured and reachable.
 - Falling back to `NoOpUserCache` when the optional cache is unavailable.
 - Constructing repository and cache adapters.
@@ -184,6 +185,21 @@ Bootstrap is the composition root. It is responsible for:
 - Building and starting the HTTP server.
 - Building and starting the standalone job worker.
 - Handling graceful shutdown.
+
+The executable exposes these operational modes:
+
+```text
+base_skeleton_rust
+├── http
+├── worker
+├── all [--migrate]
+└── db
+    ├── migrate
+    ├── info
+    └── revert --yes  (alias: undo)
+```
+
+HTTP and worker modes never require schema-changing privileges. Production deploys should run `db migrate` first, then start HTTP and workers as independently scalable processes. `all` coordinates both components in one process and is intended primarily for local or simple deployments.
 
 Conceptually:
 
@@ -523,7 +539,7 @@ Bootstrap is the only layer allowed to know that `OrderRepository` is implemente
 
 ## Database Migration Guide
 
-SQLx migrations live in `migrations/` and are embedded into the binary by `sqlx::migrate!()` in `src/bootstrap/dependencies.rs`. The application automatically applies pending migrations after connecting to PostgreSQL during startup.
+SQLx migrations live in `migrations/` and are embedded into the binary by `sqlx::migrate!()` in `src/bootstrap/database.rs`. Runtime commands never change the schema. Apply migrations explicitly with the unified application CLI before starting HTTP or workers.
 
 ### Install the SQLx CLI
 
@@ -566,7 +582,7 @@ cp .env.example .env
 docker compose up -d postgres
 ```
 
-The CLI reads `DATABASE_URL` from `.env`. The default local value is:
+Application migration commands read `MIGRATION_DATABASE_URL` when configured and otherwise fall back to `DATABASE_URL`. The default local value is:
 
 ```text
 postgres://postgres:postgres@localhost:5432/base_skeleton
@@ -643,7 +659,7 @@ Only write a down migration when rollback is safe. Dropping a column or table de
 ### Inspect pending and applied migrations
 
 ```bash
-sqlx migrate info
+cargo run -- db info
 ```
 
 SQLx records applied migrations and checksums in the `_sqlx_migrations` table.
@@ -653,37 +669,44 @@ SQLx records applied migrations and checksums in the `_sqlx_migrations` table.
 Apply all pending migrations:
 
 ```bash
-sqlx migrate run
+cargo run -- db migrate
 ```
 
-Apply migrations against an explicit database URL when necessary:
+Use a separately privileged database role when necessary:
 
 ```bash
-sqlx migrate run \
-    --database-url postgres://postgres:postgres@localhost:5432/base_skeleton
+MIGRATION_DATABASE_URL=postgres://migration_user:secret@localhost:5432/base_skeleton \
+    cargo run -- db migrate
 ```
 
-Starting the application also applies pending migrations:
+Runtime startup is deliberately separate:
 
 ```bash
-cargo run
+cargo run -- http
+cargo run -- worker
 ```
 
-For production, prefer a dedicated deployment migration job before starting new application replicas. This makes schema failures visible before traffic reaches the new version.
+For local development, one process can perform the migration before starting both components:
+
+```bash
+cargo run -- all --migrate
+```
+
+For production, use `db migrate` as a dedicated deployment job before starting new application replicas. This makes schema failures visible before traffic reaches the new version and allows the runtime database role to operate without schema privileges.
 
 ### Revert the latest reversible migration
 
 ```bash
-sqlx migrate revert
+cargo run -- db revert --yes
 ```
 
 Inspect migration state afterward:
 
 ```bash
-sqlx migrate info
+cargo run -- db info
 ```
 
-`migrate revert` requires a reversible migration with a matching `.down.sql` file. For production incidents, prefer a new forward migration that corrects the schema; reverting application code and schema independently can cause compatibility failures.
+`db revert` requires `--yes` and a reversible migration with a matching `.down.sql` file. `db undo` is an alias. The command refuses to revert the current forward-only migrations. For production incidents, prefer a new forward migration that corrects the schema; reverting application code and schema independently can cause compatibility failures.
 
 ### Never edit an applied migration
 
@@ -771,8 +794,11 @@ src/infrastructure/job/
 src/bootstrap/worker.rs
     Worker composition, polling loop, and graceful shutdown
 
-src/bin/worker.rs
-    Standalone worker process entry point
+src/bootstrap/database.rs
+    Explicit migrate, info, and guarded revert commands
+
+src/cli.rs and src/main.rs
+    One executable entry point and command dispatch
 ```
 
 The worker is an inbound adapter like HTTP presentation: it receives work from an external boundary and invokes application behavior. SQL claiming remains in infrastructure because it is PostgreSQL-specific.
@@ -837,21 +863,29 @@ Either both records exist or neither exists. This closes the crash window create
 Start the API:
 
 ```bash
-cargo run
+cargo run -- http
 ```
 
 Start one or more workers in separate processes:
 
 ```bash
-cargo run --bin worker
+cargo run -- worker
 ```
 
 For multiple workers, assign a unique stable ID to each process or pod:
 
 ```bash
-JOB_WORKER_ID=worker-1 cargo run --bin worker
-JOB_WORKER_ID=worker-2 cargo run --bin worker
+JOB_WORKER_ID=worker-1 cargo run -- worker
+JOB_WORKER_ID=worker-2 cargo run -- worker
 ```
+
+For local or single-process operation, run both components with coordinated shutdown:
+
+```bash
+cargo run -- all
+```
+
+The worker finishes its active job before shutting down. In production, keep HTTP and workers as separate processes so they can scale and restart independently.
 
 When `JOB_WORKER_ID` is omitted, the process generates a UUID-based ID.
 

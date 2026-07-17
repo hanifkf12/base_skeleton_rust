@@ -30,11 +30,6 @@ pub async fn build_dependencies(config: &Config) -> Result<Dependencies> {
         .await
         .context("could not connect to PostgreSQL")?;
 
-    sqlx::migrate!()
-        .run(&pool)
-        .await
-        .context("could not run PostgreSQL migrations")?;
-
     let readiness: Arc<dyn ReadinessCheck> = Arc::new(PostgresReadinessCheck::new(pool.clone()));
     let postgres_repository = Arc::new(PostgresUserRepository::new(pool));
     let registration_repository: Arc<dyn UserRegistrationRepository> = postgres_repository.clone();

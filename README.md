@@ -7,16 +7,34 @@ A working user CRUD API organized around Clean Architecture boundaries. PostgreS
 ```bash
 cp .env.example .env
 docker compose up -d
-cargo run
+cargo run -- db migrate
+cargo run -- all
 ```
 
-In a second terminal, start the job worker:
+`all` runs HTTP and the worker in one process for local or simple deployments. To run them as independently scalable production processes:
 
 ```bash
-cargo run --bin worker
+cargo run -- http
+cargo run -- worker
 ```
 
-Both processes run migrations during startup. The API listens on `http://localhost:3000` by default. Redis is not required for jobs; omit `REDIS_URL` if you do not want the optional user cache.
+Runtime commands do not change the database schema. Run `db migrate` as a deployment step before starting HTTP or workers. The API listens on `http://localhost:3000` by default. Redis is not required for jobs; omit `REDIS_URL` if you do not want the optional user cache.
+
+## Commands
+
+| Command | Purpose |
+| --- | --- |
+| `cargo run -- http` | Start only the REST API |
+| `cargo run -- worker` | Start only the PostgreSQL worker |
+| `cargo run -- all` | Start HTTP and worker together |
+| `cargo run -- all --migrate` | Migrate, then start HTTP and worker together |
+| `cargo run -- db migrate` | Apply pending migrations and exit |
+| `cargo run -- db info` | Show applied, pending, failed, or checksum-mismatched migrations |
+| `cargo run -- db revert --yes` | Revert the latest migration only when a matching down migration exists |
+
+`db undo --yes` is an alias for `db revert --yes`. Existing migrations are forward-only, so the revert command intentionally refuses to undo them. Prefer a new corrective migration for production rollbacks.
+
+Migration commands use `MIGRATION_DATABASE_URL` when configured and otherwise fall back to `DATABASE_URL`. This allows production to give schema privileges only to the migration process.
 
 ## PostgreSQL job queue
 
@@ -56,8 +74,8 @@ WHERE id = '<job-uuid>' AND status = 'dead';
 Run more worker processes to increase throughput:
 
 ```bash
-JOB_WORKER_ID=worker-1 cargo run --bin worker
-JOB_WORKER_ID=worker-2 cargo run --bin worker
+JOB_WORKER_ID=worker-1 cargo run -- worker
+JOB_WORKER_ID=worker-2 cargo run -- worker
 ```
 
 Keep each worker ID unique. `JOB_LEASE_TIMEOUT_SECONDS` must be longer than the normal maximum runtime of a handler; processing is at-least-once, so every real handler must also be idempotent.
