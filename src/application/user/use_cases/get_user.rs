@@ -23,6 +23,7 @@ impl GetUserUseCase {
         }
     }
 
+    #[tracing::instrument(name = "application.user.get", skip(self), fields(user.id = %id))]
     pub async fn execute(&self, id: UserId) -> Result<User, ApplicationError> {
         if let Ok(Some(user)) = self.cache.get(id).await {
             return Ok(user);

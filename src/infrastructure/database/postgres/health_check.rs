@@ -15,6 +15,7 @@ impl PostgresReadinessCheck {
 
 #[async_trait]
 impl ReadinessCheck for PostgresReadinessCheck {
+    #[tracing::instrument(name = "infrastructure.postgres.readiness", skip(self), fields(db.system = "postgresql"))]
     async fn is_ready(&self) -> bool {
         match sqlx::query_scalar::<_, i32>("SELECT 1")
             .fetch_one(&self.pool)

@@ -18,6 +18,7 @@ use super::{
     response::{UserEnvelope, UserListEnvelope, UserResponse},
 };
 
+#[tracing::instrument(name = "presentation.http.user.create", skip(state, request))]
 pub async fn create_user(
     State(state): State<AppState>,
     request: Result<Json<CreateUserRequest>, JsonRejection>,
@@ -30,6 +31,7 @@ pub async fn create_user(
     ))
 }
 
+#[tracing::instrument(name = "presentation.http.user.get", skip(state), fields(user.id = %id))]
 pub async fn get_user(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -38,6 +40,7 @@ pub async fn get_user(
     Ok(Json(UserEnvelope { data: user.into() }))
 }
 
+#[tracing::instrument(name = "presentation.http.user.list", skip(state, query))]
 pub async fn list_users(
     State(state): State<AppState>,
     query: Result<Query<ListUsersQuery>, QueryRejection>,
@@ -52,6 +55,7 @@ pub async fn list_users(
     }))
 }
 
+#[tracing::instrument(name = "presentation.http.user.update", skip(state, request), fields(user.id = %id))]
 pub async fn update_user(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -65,6 +69,7 @@ pub async fn update_user(
     Ok(Json(UserEnvelope { data: user.into() }))
 }
 
+#[tracing::instrument(name = "presentation.http.user.delete", skip(state), fields(user.id = %id))]
 pub async fn delete_user(
     State(state): State<AppState>,
     Path(id): Path<String>,

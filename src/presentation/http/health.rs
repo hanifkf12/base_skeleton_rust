@@ -23,10 +23,12 @@ struct HealthResponse {
     status: &'static str,
 }
 
+#[tracing::instrument(name = "presentation.http.health.live")]
 async fn live() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
 }
 
+#[tracing::instrument(name = "presentation.http.health.ready", skip(state))]
 async fn ready(State(state): State<HealthState>) -> (StatusCode, Json<HealthResponse>) {
     if state.readiness.is_ready().await {
         (StatusCode::OK, Json(HealthResponse { status: "ready" }))

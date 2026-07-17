@@ -50,7 +50,20 @@ pub fn build_router(
                     request_id_header.clone(),
                     MakeRequestUuid,
                 ))
-                .layer(TraceLayer::new_for_http().make_span_with(crate::telemetry::http_span))
+                .layer(
+                    TraceLayer::new_for_http()
+                        .make_span_with(crate::telemetry::http_span)
+                        .on_response(
+                            |response: &axum::response::Response,
+                             _latency: Duration,
+                             span: &tracing::Span| {
+                                span.record(
+                                    "http.response.status_code",
+                                    response.status().as_u16(),
+                                );
+                            },
+                        ),
+                )
                 .layer(PropagateRequestIdLayer::new(request_id_header))
                 .layer(TimeoutLayer::with_status_code(
                     StatusCode::REQUEST_TIMEOUT,

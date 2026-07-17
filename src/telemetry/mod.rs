@@ -111,6 +111,7 @@ pub fn http_span<B>(request: &axum::http::Request<B>) -> Span {
         otel.kind = "server",
         http.request.method = %request.method(),
         url.path = %request.uri().path(),
+        http.response.status_code = tracing::field::Empty,
         trace_id = tracing::field::Empty,
         span_id = tracing::field::Empty,
     );

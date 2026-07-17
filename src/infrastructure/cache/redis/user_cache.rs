@@ -60,6 +60,7 @@ impl TryFrom<CachedUser> for User {
 
 #[async_trait]
 impl UserCache for RedisUserCache {
+    #[tracing::instrument(name = "infrastructure.redis.user_cache.get", skip(self), fields(db.system = "redis", user.id = %id))]
     async fn get(&self, id: UserId) -> Result<Option<User>, CacheError> {
         let mut connection = self.connection.clone();
         let value: Option<String> = connection
@@ -75,6 +76,7 @@ impl UserCache for RedisUserCache {
             .transpose()
     }
 
+    #[tracing::instrument(name = "infrastructure.redis.user_cache.set", skip(self, user), fields(db.system = "redis", user.id = %user.id(), cache.ttl_seconds = ttl_seconds))]
     async fn set(&self, user: &User, ttl_seconds: u64) -> Result<(), CacheError> {
         let json =
             serde_json::to_string(&CachedUser::from(user)).map_err(log_serialization_error)?;
@@ -85,6 +87,7 @@ impl UserCache for RedisUserCache {
             .map_err(log_redis_error)
     }
 
+    #[tracing::instrument(name = "infrastructure.redis.user_cache.delete", skip(self), fields(db.system = "redis", user.id = %id))]
     async fn delete(&self, id: UserId) -> Result<(), CacheError> {
         let mut connection = self.connection.clone();
         connection

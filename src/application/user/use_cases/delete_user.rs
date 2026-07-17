@@ -14,6 +14,7 @@ impl DeleteUserUseCase {
         Self { repository, cache }
     }
 
+    #[tracing::instrument(name = "application.user.delete", skip(self), fields(user.id = %id))]
     pub async fn execute(&self, id: UserId) -> Result<(), ApplicationError> {
         if !self.repository.delete(id).await? {
             return Err(ApplicationError::NotFound);

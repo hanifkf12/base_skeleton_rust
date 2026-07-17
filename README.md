@@ -133,6 +133,51 @@ The service accepts W3C `traceparent` and `tracestate` headers, exports HTTP spa
 
 For self-hosted deployments, OTLP/HTTP is normally exposed on port `4318`; use the regional ingest endpoint supplied by SigNoz Cloud for cloud deployments. See the [SigNoz Rust instrumentation guide](https://signoz.io/docs/instrumentation/opentelemetry-rust/) and [self-hosted ingestion overview](https://signoz.io/docs/ingestion/self-hosted/overview/).
 
+### Run with tracing and logging
+
+1. Apply the queue migration, then start the service with the OTLP endpoint configured:
+
+   ```bash
+   cargo run -- db migrate
+   OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
+   OTEL_SERVICE_NAME=base-skeleton-rust \
+   cargo run -- all
+   ```
+
+2. Send a request. The application writes JSON logs to stdout and exports its trace asynchronously:
+
+   ```bash
+   curl -i -X POST http://localhost:3000/api/v1/users \
+     -H 'content-type: application/json' \
+     -d '{"email":"ada@example.com","display_name":"Ada Lovelace"}'
+   ```
+
+3. In SigNoz, filter traces by `service.name = base-skeleton-rust`. Open the HTTP trace to see its nested spans; use `trace_id` and `span_id` from a JSON log to find the related trace.
+
+The standard `RUST_LOG` filter controls log verbosity. For normal production operation, start with `RUST_LOG=base_skeleton_rust=info,tower_http=info`; use `debug` temporarily when diagnosing a request. Never put secrets in `RUST_LOG` or span fields.
+
+### Trace layout
+
+An HTTP request has one root span and nested layer spans:
+
+```text
+http.request                         method, path, final status
+└─ presentation.http.user.create     HTTP adapter
+   └─ application.user.create        use case
+      ├─ infrastructure.postgres.user.create_with_job
+      └─ infrastructure.redis.user_cache.set
+```
+
+Read operations use the same structure, with `infrastructure.redis.user_cache.get` and/or a PostgreSQL repository span. Health readiness requests include a PostgreSQL readiness span. The root HTTP span is closed after Axum produces the response and records `http.response.status_code`.
+
+Creating a user also saves W3C trace context with `user.created`. When the worker consumes that row, it creates a `job.process` consumer span under the originating trace. The producer request and asynchronous job therefore remain correlated even when different processes run the API and worker.
+
+### Propagation, collection, and safety
+
+Clients or upstream services should forward W3C `traceparent` and optional `tracestate` headers. This service extracts them for incoming requests and uses them as the parent trace context. Configure the SigNoz Collector to read the service/container stdout as JSON logs; SigNoz can then correlate the `trace_id` and `span_id` fields with OTLP traces.
+
+Only safe operational fields are recorded: method, path, status, user ID, page values, job ID/type, cache TTL, and database/cache system. The application intentionally excludes request bodies, emails, display names, job payloads, authorization headers, cookies, SQL parameters, and connection strings.
+
 ## Checks
 
 ```bash

@@ -23,6 +23,7 @@ impl UpdateUserUseCase {
         }
     }
 
+    #[tracing::instrument(name = "application.user.update", skip(self, input), fields(user.id = %id))]
     pub async fn execute(
         &self,
         id: UserId,

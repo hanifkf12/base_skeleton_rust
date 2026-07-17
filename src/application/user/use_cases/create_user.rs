@@ -31,6 +31,7 @@ impl CreateUserUseCase {
         }
     }
 
+    #[tracing::instrument(name = "application.user.create", skip(self, input))]
     pub async fn execute(&self, input: CreateUserInput) -> Result<User, ApplicationError> {
         let user = User::new(
             Email::parse(input.email)?,

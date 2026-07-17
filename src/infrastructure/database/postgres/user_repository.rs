@@ -52,6 +52,7 @@ impl UserRow {
 
 #[async_trait]
 impl UserRepository for PostgresUserRepository {
+    #[tracing::instrument(name = "infrastructure.postgres.user.create", skip(self, user), fields(db.system = "postgresql", user.id = %user.id()))]
     async fn create(&self, user: &User) -> Result<User, RepositoryError> {
         sqlx::query_as::<_, UserRow>(
             r#"INSERT INTO users (id, email, display_name, created_at, updated_at)
@@ -69,6 +70,7 @@ impl UserRepository for PostgresUserRepository {
         .into_domain()
     }
 
+    #[tracing::instrument(name = "infrastructure.postgres.user.find", skip(self), fields(db.system = "postgresql", user.id = %id))]
     async fn find_by_id(&self, id: UserId) -> Result<Option<User>, RepositoryError> {
         sqlx::query_as::<_, UserRow>(
             "SELECT id, email, display_name, created_at, updated_at FROM users WHERE id = $1",
@@ -81,6 +83,7 @@ impl UserRepository for PostgresUserRepository {
         .transpose()
     }
 
+    #[tracing::instrument(name = "infrastructure.postgres.user.list", skip(self), fields(db.system = "postgresql", page.size = limit, page.offset = offset))]
     async fn list(&self, limit: u32, offset: u64) -> Result<Vec<User>, RepositoryError> {
         let rows = sqlx::query_as::<_, UserRow>(
             r#"SELECT id, email, display_name, created_at, updated_at
@@ -95,6 +98,7 @@ impl UserRepository for PostgresUserRepository {
         rows.into_iter().map(UserRow::into_domain).collect()
     }
 
+    #[tracing::instrument(name = "infrastructure.postgres.user.update", skip(self, user), fields(db.system = "postgresql", user.id = %user.id()))]
     async fn update(&self, user: &User) -> Result<Option<User>, RepositoryError> {
         sqlx::query_as::<_, UserRow>(
             r#"UPDATE users SET email = $2, display_name = $3, updated_at = $4
@@ -112,6 +116,7 @@ impl UserRepository for PostgresUserRepository {
         .transpose()
     }
 
+    #[tracing::instrument(name = "infrastructure.postgres.user.delete", skip(self), fields(db.system = "postgresql", user.id = %id))]
     async fn delete(&self, id: UserId) -> Result<bool, RepositoryError> {
         let result = sqlx::query("DELETE FROM users WHERE id = $1")
             .bind(id.as_uuid())
@@ -124,6 +129,7 @@ impl UserRepository for PostgresUserRepository {
 
 #[async_trait]
 impl UserRegistrationRepository for PostgresUserRepository {
+    #[tracing::instrument(name = "infrastructure.postgres.user.create_with_job", skip(self, user, job), fields(db.system = "postgresql", user.id = %user.id(), job.id = %job.id, job.type = %job.job_type))]
     async fn create_with_job(&self, user: &User, job: &NewJob) -> Result<User, RepositoryError> {
         let max_attempts = i32::try_from(job.max_attempts).map_err(|error| {
             tracing::error!(%error, max_attempts = job.max_attempts, "max_attempts is too large");
