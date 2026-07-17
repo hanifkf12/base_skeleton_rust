@@ -105,7 +105,7 @@ Infrastructure contains concrete implementations of application ports:
 
 ```text
 UserRepository → PostgresUserRepository
-UserCache      → RedisUserCache
+UserCache      → RedisUserCache / NoOpUserCache
 ```
 
 Infrastructure is responsible for:
@@ -155,7 +155,8 @@ Bootstrap is the composition root. It is responsible for:
 - Loading configuration.
 - Creating the PostgreSQL connection pool.
 - Running database migrations.
-- Creating the Redis connection manager.
+- Creating the Redis connection manager when Redis is configured and reachable.
+- Falling back to `NoOpUserCache` when the optional cache is unavailable.
 - Constructing repository and cache adapters.
 - Injecting adapters into application use cases.
 - Creating Axum application state.
@@ -169,6 +170,8 @@ PostgresUserRepository ─┐
                        ├─→ CreateUserUseCase ─→ AppState ─→ Axum Router
 RedisUserCache ─────────┘
 ```
+
+PostgreSQL is a required dependency and powers `/health/ready`. Redis is deliberately excluded from readiness because it is an optional optimization rather than a source of truth. `/health/live` only reports that the process is running.
 
 No service locator or global mutable dependency container is used.
 

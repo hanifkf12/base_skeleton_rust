@@ -1,6 +1,6 @@
 # Rust Axum Clean Architecture Skeleton
 
-A working user CRUD API organized around Clean Architecture boundaries. PostgreSQL is the source of truth and Redis is a best-effort cache for single-user reads.
+A working user CRUD API organized around Clean Architecture boundaries. PostgreSQL is the source of truth and Redis is an optional, best-effort cache for single-user reads.
 
 ## Run locally
 
@@ -17,6 +17,8 @@ The application runs migrations during startup and listens on `http://localhost:
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/health` | Liveness probe |
+| `GET` | `/health/live` | Explicit liveness probe |
+| `GET` | `/health/ready` | PostgreSQL readiness probe |
 | `POST` | `/api/v1/users` | Create a user |
 | `GET` | `/api/v1/users?page=1&per_page=20` | List users |
 | `GET` | `/api/v1/users/{id}` | Get a user |
@@ -40,7 +42,9 @@ Create and update bodies use this shape:
 - `infrastructure` implements the ports with SQLx/PostgreSQL and Redis.
 - `bootstrap` is the composition root and the only module that wires concrete implementations together.
 
-Cache failures do not fail requests; PostgreSQL remains authoritative. A generic transaction abstraction is intentionally absent because every current operation is a single atomic statement.
+Cache failures do not fail startup or requests; the application falls back to a no-op cache and PostgreSQL remains authoritative. Omit `REDIS_URL` to disable caching intentionally. A generic transaction abstraction is intentionally absent because every current operation is a single atomic statement.
+
+Every response includes an `x-request-id`. Authorization and cookie headers are marked sensitive in traces, request bodies are limited by `MAX_REQUEST_BODY_BYTES`, and requests are bounded by `REQUEST_TIMEOUT_SECONDS`.
 
 ## Checks
 
@@ -49,3 +53,5 @@ cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 ```
+
+The same checks run automatically through `.github/workflows/ci.yml`.

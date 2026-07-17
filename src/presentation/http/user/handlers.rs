@@ -1,6 +1,9 @@
 use axum::{
     Json,
-    extract::{Path, Query, State},
+    extract::{
+        Path, Query, State,
+        rejection::{JsonRejection, QueryRejection},
+    },
     http::StatusCode,
 };
 
@@ -17,8 +20,9 @@ use super::{
 
 pub async fn create_user(
     State(state): State<AppState>,
-    Json(request): Json<CreateUserRequest>,
+    request: Result<Json<CreateUserRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<UserEnvelope>), ApiError> {
+    let Json(request) = request.map_err(ApiError::from)?;
     let user = state.create_user.execute(request.into()).await?;
     Ok((
         StatusCode::CREATED,
@@ -36,8 +40,9 @@ pub async fn get_user(
 
 pub async fn list_users(
     State(state): State<AppState>,
-    Query(query): Query<ListUsersQuery>,
+    query: Result<Query<ListUsersQuery>, QueryRejection>,
 ) -> Result<Json<UserListEnvelope>, ApiError> {
+    let Query(query) = query.map_err(ApiError::from)?;
     let input = ListUsersInput::from(query);
     let users = state.list_users.execute(input).await?;
     Ok(Json(UserListEnvelope {
@@ -50,8 +55,9 @@ pub async fn list_users(
 pub async fn update_user(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(request): Json<UpdateUserRequest>,
+    request: Result<Json<UpdateUserRequest>, JsonRejection>,
 ) -> Result<Json<UserEnvelope>, ApiError> {
+    let Json(request) = request.map_err(ApiError::from)?;
     let user = state
         .update_user
         .execute(parse_id(&id)?, request.into())

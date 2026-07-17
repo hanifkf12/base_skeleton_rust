@@ -1,4 +1,9 @@
-use axum::{Json, http::StatusCode, response::IntoResponse};
+use axum::{
+    Json,
+    extract::rejection::{JsonRejection, QueryRejection},
+    http::StatusCode,
+    response::IntoResponse,
+};
 use serde::Serialize;
 
 use crate::application::user::ApplicationError;
@@ -16,6 +21,26 @@ impl ApiError {
             code: "invalid_user_id",
             message: "user id must be a valid UUID".to_owned(),
         }
+    }
+
+    fn invalid_request(code: &'static str, message: String) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code,
+            message,
+        }
+    }
+}
+
+impl From<JsonRejection> for ApiError {
+    fn from(error: JsonRejection) -> Self {
+        Self::invalid_request("invalid_json", error.body_text())
+    }
+}
+
+impl From<QueryRejection> for ApiError {
+    fn from(error: QueryRejection) -> Self {
+        Self::invalid_request("invalid_query", error.body_text())
     }
 }
 

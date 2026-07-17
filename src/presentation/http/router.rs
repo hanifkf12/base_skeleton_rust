@@ -1,27 +1,60 @@
+use std::{sync::Arc, time::Duration};
+
 use axum::{
-    Json, Router,
+    Router,
+    extract::DefaultBodyLimit,
+    http::{StatusCode, header},
     routing::{get, post},
 };
-use serde_json::{Value, json};
-use tower_http::trace::TraceLayer;
+use tower::ServiceBuilder;
+use tower_http::{
+    request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
+    sensitive_headers::SetSensitiveRequestHeadersLayer,
+    timeout::TimeoutLayer,
+    trace::TraceLayer,
+};
+
+use crate::application::health::ReadinessCheck;
 
 use super::{
-    AppState,
+    AppState, health,
     user::{create_user, delete_user, get_user, list_users, update_user},
 };
 
-pub fn build_router(state: AppState) -> Router {
-    Router::new()
-        .route("/health", get(health))
+pub fn build_router(
+    state: AppState,
+    readiness: Arc<dyn ReadinessCheck>,
+    request_timeout_seconds: u64,
+    max_request_body_bytes: usize,
+) -> Router {
+    let request_id_header = header::HeaderName::from_static("x-request-id");
+    let api = Router::new()
         .route("/api/v1/users", post(create_user).get(list_users))
         .route(
             "/api/v1/users/{id}",
             get(get_user).put(update_user).delete(delete_user),
         )
-        .layer(TraceLayer::new_for_http())
-        .with_state(state)
-}
+        .with_state(state);
 
-async fn health() -> Json<Value> {
-    Json(json!({ "status": "ok" }))
+    Router::new()
+        .merge(health::router(readiness))
+        .merge(api)
+        .layer(DefaultBodyLimit::max(max_request_body_bytes))
+        .layer(
+            ServiceBuilder::new()
+                .layer(SetSensitiveRequestHeadersLayer::new([
+                    header::AUTHORIZATION,
+                    header::COOKIE,
+                ]))
+                .layer(SetRequestIdLayer::new(
+                    request_id_header.clone(),
+                    MakeRequestUuid,
+                ))
+                .layer(TraceLayer::new_for_http())
+                .layer(PropagateRequestIdLayer::new(request_id_header))
+                .layer(TimeoutLayer::with_status_code(
+                    StatusCode::REQUEST_TIMEOUT,
+                    Duration::from_secs(request_timeout_seconds),
+                )),
+        )
 }

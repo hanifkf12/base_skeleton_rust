@@ -3,15 +3,20 @@ use tokio::net::TcpListener;
 
 use crate::{config::Config, presentation::http::build_router, telemetry};
 
-use super::dependencies::build_state;
+use super::dependencies::build_dependencies;
 
 pub async fn run() -> Result<()> {
     dotenvy::dotenv().ok();
     telemetry::init();
 
     let config = Config::from_env()?;
-    let state = build_state(&config).await?;
-    let router = build_router(state);
+    let dependencies = build_dependencies(&config).await?;
+    let router = build_router(
+        dependencies.state,
+        dependencies.readiness,
+        config.request_timeout_seconds,
+        config.max_request_body_bytes,
+    );
     let listener = TcpListener::bind(config.server_address)
         .await
         .with_context(|| format!("could not bind server to {}", config.server_address))?;

@@ -1,4 +1,5 @@
 mod error;
+mod health;
 mod router;
 mod state;
 mod user;

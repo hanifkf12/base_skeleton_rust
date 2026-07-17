@@ -120,11 +120,13 @@ impl UserRepository for PostgresUserRepository {
 }
 
 fn map_sqlx_error(error: sqlx::Error) -> RepositoryError {
-    if matches!(&error, sqlx::Error::Database(database_error) if database_error.is_unique_violation())
+    if let sqlx::Error::Database(database_error) = &error
+        && database_error.is_unique_violation()
+        && database_error.constraint() == Some("users_email_unique")
     {
-        RepositoryError::DuplicateEmail
-    } else {
-        tracing::error!(error = ?error, "PostgreSQL user operation failed");
-        RepositoryError::Unavailable
+        return RepositoryError::DuplicateEmail;
     }
+
+    tracing::error!(error = ?error, "PostgreSQL user operation failed");
+    RepositoryError::Unavailable
 }
