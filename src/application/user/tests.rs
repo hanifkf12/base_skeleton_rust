@@ -5,16 +5,29 @@ use std::{
 
 use async_trait::async_trait;
 
-use crate::domain::user::{DisplayName, Email, User, UserId};
+use crate::{
+    application::job::NewJob,
+    domain::user::{DisplayName, Email, User, UserId},
+};
 
 use super::{
     CacheError, CreateUserInput, CreateUserUseCase, GetUserUseCase, RepositoryError, UserCache,
-    UserRepository,
+    UserRegistrationRepository, UserRepository,
 };
 
 #[derive(Default)]
 struct FakeUserRepository {
     users: Mutex<HashMap<UserId, User>>,
+    jobs: Mutex<Vec<NewJob>>,
+}
+
+#[async_trait]
+impl UserRegistrationRepository for FakeUserRepository {
+    async fn create_with_job(&self, user: &User, job: &NewJob) -> Result<User, RepositoryError> {
+        let created = self.create(user).await?;
+        self.jobs.lock().unwrap().push(job.clone());
+        Ok(created)
+    }
 }
 
 #[async_trait]
@@ -87,7 +100,7 @@ impl UserCache for FakeUserCache {
 async fn create_user_validates_and_populates_cache() {
     let repository = Arc::new(FakeUserRepository::default());
     let cache = Arc::new(FakeUserCache::default());
-    let use_case = CreateUserUseCase::new(repository, cache.clone(), 60);
+    let use_case = CreateUserUseCase::new(repository.clone(), cache.clone(), 60, 5);
 
     let user = use_case
         .execute(CreateUserInput {
@@ -99,6 +112,10 @@ async fn create_user_validates_and_populates_cache() {
 
     assert_eq!(user.email().as_str(), "ada@example.com");
     assert!(cache.get(user.id()).await.unwrap().is_some());
+    let jobs = repository.jobs.lock().unwrap();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].job_type, "user.created");
+    assert_eq!(jobs[0].payload["user_id"], user.id().to_string());
 }
 
 #[tokio::test]

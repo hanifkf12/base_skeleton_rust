@@ -20,6 +20,20 @@ Infrastructure adapter
 PostgreSQL / Redis
 ```
 
+Background jobs follow a second inbound path:
+
+```text
+PostgreSQL background_jobs
+    ↓  claim with FOR UPDATE SKIP LOCKED
+Worker binary
+    ↓
+Application JobWorker
+    ↓
+Registered JobHandler
+    ↓
+Idempotent side effect
+```
+
 The dependency direction is:
 
 ```text
@@ -75,9 +89,10 @@ Each action is represented by a concrete use-case struct with explicit dependenc
 
 ```rust
 pub struct CreateUserUseCase {
-    repository: Arc<dyn UserRepository>,
+    repository: Arc<dyn UserRegistrationRepository>,
     cache: Arc<dyn UserCache>,
     cache_ttl_seconds: u64,
+    job_max_attempts: u32,
 }
 ```
 
@@ -91,9 +106,13 @@ pub trait UserRepository {
 pub trait UserCache {
     // User-specific cache operations.
 }
+
+pub trait JobQueue {
+    // Enqueue, claim, complete, and fail durable background jobs.
+}
 ```
 
-The application knows that users must be persisted and cached, but it does not know that PostgreSQL and Redis provide those capabilities.
+The application knows that users must be persisted, cached, and sometimes followed by durable work, but it does not know that PostgreSQL and Redis provide those capabilities.
 
 Dynamic dispatch with `Arc<dyn Port>` is used at external boundaries because dependencies are shared by Axum state and can easily be replaced by fakes in tests. Use cases themselves remain concrete structs.
 
@@ -106,6 +125,8 @@ Infrastructure contains concrete implementations of application ports:
 ```text
 UserRepository → PostgresUserRepository
 UserCache      → RedisUserCache / NoOpUserCache
+JobQueue       → PostgresJobQueue
+JobHandler     → UserCreatedHandler
 ```
 
 Infrastructure is responsible for:
@@ -161,6 +182,7 @@ Bootstrap is the composition root. It is responsible for:
 - Injecting adapters into application use cases.
 - Creating Axum application state.
 - Building and starting the HTTP server.
+- Building and starting the standalone job worker.
 - Handling graceful shutdown.
 
 Conceptually:
@@ -169,6 +191,8 @@ Conceptually:
 PostgresUserRepository ─┐
                        ├─→ CreateUserUseCase ─→ AppState ─→ Axum Router
 RedisUserCache ─────────┘
+
+PostgresJobQueue ──→ JobWorker ──→ UserCreatedHandler
 ```
 
 PostgreSQL is a required dependency and powers `/health/ready`. Redis is deliberately excluded from readiness because it is an optional optimization rather than a source of truth. `/health/live` only reports that the process is running.
@@ -715,7 +739,283 @@ PostgreSQL may lock writes while building a normal index. For a large production
 - [ ] Destructive changes have a backup and recovery plan.
 - [ ] Rollback uses a tested down migration or a forward corrective migration.
 
+## PostgreSQL Background Job Queue
+
+The project now has a durable queue in the same PostgreSQL database as the business data. It is a good fit while throughput is moderate and keeping operations simple matters more than broker-specific features.
+
+### Why PostgreSQL is sufficient here
+
+- The application already requires PostgreSQL.
+- A business write and its job can commit in one transaction.
+- Jobs survive API and worker restarts.
+- Multiple workers can claim different jobs concurrently.
+- No Redis or separate message broker is required for delivery.
+
+The queue provides at-least-once processing, not exactly-once processing. A worker can finish an external side effect and crash before marking the job complete. The same job may then be processed again after its lease expires. Every handler must therefore be idempotent.
+
+### Queue files and ownership
+
+```text
+migrations/0003_create_background_jobs.sql
+    Database schema, constraints, and queue indexes
+
+src/application/job/
+    Queue models and ports, handler contract, retry orchestration
+
+src/infrastructure/database/postgres/job_queue.rs
+    PostgreSQL enqueue, claim, completion, failure, and lease recovery
+
+src/infrastructure/job/
+    Concrete job handlers
+
+src/bootstrap/worker.rs
+    Worker composition, polling loop, and graceful shutdown
+
+src/bin/worker.rs
+    Standalone worker process entry point
+```
+
+The worker is an inbound adapter like HTTP presentation: it receives work from an external boundary and invokes application behavior. SQL claiming remains in infrastructure because it is PostgreSQL-specific.
+
+### Job lifecycle
+
+```text
+                 handler succeeds
+pending ──claim──→ running ─────────────→ completed
+   ↑                  │
+   │                  │ handler fails and attempts remain
+   └────backoff───────┘
+                      │
+                      │ handler fails on final attempt
+                      ↓
+                     dead
+```
+
+`attempts` increments when a worker claims a job. A failure schedules the next `available_at` using exponential backoff. After `max_attempts`, the job moves to `dead` and is no longer claimed automatically.
+
+If a process crashes while a job is `running`, another claim operation detects the expired `locked_at` lease. It returns the job to `pending`, or moves it to `dead` if no attempts remain.
+
+### Concurrent claiming
+
+The PostgreSQL adapter selects one ready job using:
+
+```sql
+FOR UPDATE SKIP LOCKED
+```
+
+It updates and returns the selected row in the same transaction. Competing workers skip a row already locked by another worker instead of waiting for it. You can safely run multiple worker processes against the same table.
+
+The completion and failure updates include both `job_id` and `locked_by`. A stale worker cannot change a job after its lease has been taken over.
+
+### Atomic user creation and job publication
+
+`CreateUserUseCase` builds a `user.created` job and calls the focused application port:
+
+```rust
+pub trait UserRegistrationRepository: Send + Sync {
+    async fn create_with_job(
+        &self,
+        user: &User,
+        job: &NewJob,
+    ) -> Result<User, RepositoryError>;
+}
+```
+
+`PostgresUserRepository` implements this port by inserting the user and job through one SQLx transaction:
+
+```text
+BEGIN
+  INSERT users
+  INSERT background_jobs
+COMMIT
+```
+
+Either both records exist or neither exists. This closes the crash window created by saving the user first and enqueueing afterward. A focused port expresses this use case without introducing a generic unit-of-work abstraction.
+
+### Running workers
+
+Start the API:
+
+```bash
+cargo run
+```
+
+Start one or more workers in separate processes:
+
+```bash
+cargo run --bin worker
+```
+
+For multiple workers, assign a unique stable ID to each process or pod:
+
+```bash
+JOB_WORKER_ID=worker-1 cargo run --bin worker
+JOB_WORKER_ID=worker-2 cargo run --bin worker
+```
+
+When `JOB_WORKER_ID` is omitted, the process generates a UUID-based ID.
+
+### Worker configuration
+
+| Variable | Default | Meaning |
+| --- | ---: | --- |
+| `JOB_POLL_INTERVAL_MILLISECONDS` | `1000` | Delay before polling again when the queue is empty or unavailable |
+| `JOB_LEASE_TIMEOUT_SECONDS` | `300` | Time before another worker may recover an abandoned running job |
+| `JOB_RETRY_BASE_SECONDS` | `5` | Delay before the first retry |
+| `JOB_RETRY_MAX_SECONDS` | `300` | Maximum exponential retry delay |
+| `JOB_MAX_ATTEMPTS` | `5` | Attempt limit assigned to newly created jobs |
+| `JOB_WORKER_ID` | generated | Unique owner recorded while a job is running |
+
+Set the lease timeout longer than the normal maximum handler duration. The current implementation uses a fixed lease and does not send heartbeats during a long handler. If jobs legitimately run longer than the lease, split them into shorter jobs or add a lease-renewal operation before lowering the timeout.
+
+### Adding a new job type
+
+Use these steps for a new job such as `user.send_welcome_email`.
+
+#### 1. Define a stable type and payload
+
+Add the job-type constant near the application job model and define an explicitly serializable payload at the producer boundary:
+
+```rust
+pub const SEND_WELCOME_EMAIL_JOB: &str = "user.send_welcome_email.v1";
+
+let job = NewJob::new(
+    SEND_WELCOME_EMAIL_JOB,
+    serde_json::json!({
+        "user_id": user.id().to_string(),
+        "email": user.email().as_str(),
+    }),
+    job_max_attempts,
+);
+```
+
+Treat the stored payload as a persistent public contract. Deployed workers may read jobs created by older application versions. Prefer additive payload changes. Use a new versioned job type for a breaking payload change.
+
+Store identifiers and the minimum data required for the operation. Avoid serializing an entire domain entity because its shape changes more often and may become stale.
+
+#### 2. Choose the transaction boundary
+
+If losing the job after a business write is unacceptable, add a focused port that saves both records atomically, following `UserRegistrationRepository`.
+
+If the job is independent and occasional loss between operations is explicitly acceptable, inject `Arc<dyn JobQueue>` and call `enqueue`. Make this weaker guarantee visible in the use-case design and tests.
+
+#### 3. Implement a handler
+
+Create a handler under `src/infrastructure/job`:
+
+```rust
+pub struct SendWelcomeEmailHandler {
+    email_client: Arc<dyn EmailClient>,
+}
+
+#[async_trait]
+impl JobHandler for SendWelcomeEmailHandler {
+    fn job_type(&self) -> &'static str {
+        SEND_WELCOME_EMAIL_JOB
+    }
+
+    async fn handle(&self, job: &ClaimedJob) -> Result<(), JobHandlerError> {
+        // Validate payload, invoke the application/external port, and return an error to retry.
+        Ok(())
+    }
+}
+```
+
+Do not swallow a retryable error. Return `JobHandlerError` so the worker schedules another attempt. Do not log credentials, tokens, or confidential payload values.
+
+#### 4. Make the side effect idempotent
+
+Use the queue job ID as an idempotency key when the external service supports it. For a database side effect, store the job ID in a column with a unique constraint and use `INSERT ... ON CONFLICT DO NOTHING`.
+
+Examples:
+
+- Email provider: send with `job.id` as the provider idempotency key.
+- Webhook delivery: persist a delivery record keyed by `job.id`.
+- Account credit: write a ledger entry with a unique `source_job_id`.
+- Search indexing: upsert by aggregate ID and version.
+
+Checking only whether a business row currently “looks processed” is often unsafe when concurrent changes are possible.
+
+#### 5. Register the handler
+
+Add the concrete handler in `src/bootstrap/worker.rs`:
+
+```rust
+let handlers: Vec<Arc<dyn JobHandler>> = vec![
+    Arc::new(UserCreatedHandler),
+    Arc::new(SendWelcomeEmailHandler::new(email_client)),
+];
+```
+
+An unregistered type fails explicitly and follows the normal retry/dead-letter path; it is not silently completed.
+
+#### 6. Test the job
+
+Cover at least:
+
+- Valid and invalid payload handling.
+- Idempotent repeated handling.
+- Successful completion.
+- Retry after a handler error.
+- Dead-letter transition on the last attempt.
+- Atomic rollback when either the business insert or job insert fails.
+- Concurrent workers do not claim the same available row at the same time.
+
+### Operations and recovery
+
+Inspect recent jobs:
+
+```sql
+SELECT id, job_type, status, attempts, max_attempts,
+       available_at, locked_at, locked_by, last_error, created_at
+FROM background_jobs
+ORDER BY created_at DESC
+LIMIT 100;
+```
+
+Count queue depth and failures:
+
+```sql
+SELECT job_type, status, COUNT(*)
+FROM background_jobs
+GROUP BY job_type, status
+ORDER BY job_type, status;
+```
+
+After fixing the underlying cause, retry one dead job by resetting its attempt budget:
+
+```sql
+UPDATE background_jobs
+SET status = 'pending',
+    attempts = 0,
+    available_at = NOW(),
+    last_error = NULL,
+    updated_at = NOW()
+WHERE id = '<job-uuid>' AND status = 'dead';
+```
+
+Do not reset every dead job without inspecting its type and error. A permanently invalid payload will repeatedly fail and add load.
+
+Add monitoring for:
+
+- Oldest pending-job age.
+- Pending count per type.
+- Dead-job count per type.
+- Retry rate.
+- Handler duration relative to lease timeout.
+- PostgreSQL connection-pool saturation.
+
+Completed jobs remain available for auditing. Add a bounded cleanup task when volume requires it, for example deleting completed rows older than a documented retention period in small batches. Do not delete pending, running, or dead jobs as routine cleanup.
+
+### When to move beyond PostgreSQL
+
+Keep PostgreSQL while it meets latency and throughput needs. Consider Redis Streams, RabbitMQ, NATS, SQS, or Kafka when measurements show a real requirement such as very high queue throughput, broker-managed routing, long retention/replay, cross-service fan-out, or isolation from the primary database.
+
+The application-owned `JobQueue` and `JobHandler` contracts make that change possible, but transactional publication must be reconsidered. When the broker is outside PostgreSQL, use an outbox relay so the business transaction does not depend on a non-atomic database-plus-broker write.
+
 ## Adding Domain Events
+
+The current `user.created` record is an application background job: it tells this service to perform local work. A domain event is a business fact and may have multiple consumers. They can share similar payloads, but they are not automatically the same abstraction.
 
 A domain event describes a meaningful business fact that has already happened:
 
@@ -861,20 +1161,20 @@ published_at
 attempt_count
 ```
 
-For one real workflow, prefer a focused atomic port over a large generic unit-of-work abstraction:
+For one real workflow, prefer a focused atomic port over a large generic unit-of-work abstraction. The current local PostgreSQL job implementation uses:
 
 ```rust
 #[async_trait]
-pub trait UserRegistrationStore: Send + Sync {
-    async fn save_user_and_event(
+pub trait UserRegistrationRepository: Send + Sync {
+    async fn create_with_job(
         &self,
         user: &User,
-        event: &UserRegistered,
+        job: &NewJob,
     ) -> Result<User, RepositoryError>;
 }
 ```
 
-The PostgreSQL implementation performs the user insert and outbox insert in one SQLx transaction.
+The PostgreSQL implementation performs the user insert and `background_jobs` insert in one SQLx transaction. For publishing to an external broker, use a separate outbox record and relay so broker availability does not become part of the business transaction.
 
 Consumers should use `event_id` for idempotency because message brokers may deliver the same event more than once.
 

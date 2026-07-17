@@ -11,9 +11,11 @@ use axum::{
 use base_skeleton_rust::{
     application::{
         health::ReadinessCheck,
+        job::NewJob,
         user::{
             CacheError, CreateUserUseCase, DeleteUserUseCase, GetUserUseCase, ListUsersUseCase,
-            RepositoryError, UpdateUserUseCase, UserCache, UserRepository,
+            RepositoryError, UpdateUserUseCase, UserCache, UserRegistrationRepository,
+            UserRepository,
         },
     },
     domain::user::{User, UserId},
@@ -72,6 +74,13 @@ impl UserRepository for InMemoryUserRepository {
     }
 }
 
+#[async_trait]
+impl UserRegistrationRepository for InMemoryUserRepository {
+    async fn create_with_job(&self, user: &User, _job: &NewJob) -> Result<User, RepositoryError> {
+        self.create(user).await
+    }
+}
+
 struct NoOpCache;
 
 #[async_trait]
@@ -99,13 +108,16 @@ impl ReadinessCheck for AlwaysReady {
 }
 
 fn app() -> axum::Router {
-    let repository: Arc<dyn UserRepository> = Arc::new(InMemoryUserRepository::default());
+    let in_memory_repository = Arc::new(InMemoryUserRepository::default());
+    let registration_repository: Arc<dyn UserRegistrationRepository> = in_memory_repository.clone();
+    let repository: Arc<dyn UserRepository> = in_memory_repository;
     let cache: Arc<dyn UserCache> = Arc::new(NoOpCache);
     let state = AppState {
         create_user: Arc::new(CreateUserUseCase::new(
-            repository.clone(),
+            registration_repository,
             cache.clone(),
             60,
+            5,
         )),
         get_user: Arc::new(GetUserUseCase::new(repository.clone(), cache.clone(), 60)),
         list_users: Arc::new(ListUsersUseCase::new(repository.clone())),

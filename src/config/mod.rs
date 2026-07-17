@@ -12,6 +12,12 @@ pub struct Config {
     pub user_cache_ttl_seconds: u64,
     pub request_timeout_seconds: u64,
     pub max_request_body_bytes: usize,
+    pub job_poll_interval_milliseconds: u64,
+    pub job_lease_timeout_seconds: u64,
+    pub job_retry_base_seconds: u64,
+    pub job_retry_max_seconds: u64,
+    pub job_max_attempts: u32,
+    pub job_worker_id: Option<String>,
 }
 
 impl Config {
@@ -26,6 +32,11 @@ impl Config {
         let user_cache_ttl_seconds = parse_or("USER_CACHE_TTL_SECONDS", 300)?;
         let request_timeout_seconds = parse_or("REQUEST_TIMEOUT_SECONDS", 10)?;
         let max_request_body_bytes = parse_or("MAX_REQUEST_BODY_BYTES", 65_536)?;
+        let job_poll_interval_milliseconds = parse_or("JOB_POLL_INTERVAL_MILLISECONDS", 1_000)?;
+        let job_lease_timeout_seconds = parse_or("JOB_LEASE_TIMEOUT_SECONDS", 300)?;
+        let job_retry_base_seconds = parse_or("JOB_RETRY_BASE_SECONDS", 5)?;
+        let job_retry_max_seconds = parse_or("JOB_RETRY_MAX_SECONDS", 300)?;
+        let job_max_attempts = parse_or("JOB_MAX_ATTEMPTS", 5)?;
 
         ensure!(
             database_max_connections > 0,
@@ -47,6 +58,26 @@ impl Config {
             max_request_body_bytes > 0,
             "MAX_REQUEST_BODY_BYTES must be greater than zero"
         );
+        ensure!(
+            job_poll_interval_milliseconds > 0,
+            "JOB_POLL_INTERVAL_MILLISECONDS must be greater than zero"
+        );
+        ensure!(
+            job_lease_timeout_seconds > 0,
+            "JOB_LEASE_TIMEOUT_SECONDS must be greater than zero"
+        );
+        ensure!(
+            job_retry_base_seconds > 0,
+            "JOB_RETRY_BASE_SECONDS must be greater than zero"
+        );
+        ensure!(
+            job_retry_max_seconds >= job_retry_base_seconds,
+            "JOB_RETRY_MAX_SECONDS must be greater than or equal to JOB_RETRY_BASE_SECONDS"
+        );
+        ensure!(
+            job_max_attempts > 0,
+            "JOB_MAX_ATTEMPTS must be greater than zero"
+        );
 
         Ok(Self {
             server_address,
@@ -57,6 +88,12 @@ impl Config {
             user_cache_ttl_seconds,
             request_timeout_seconds,
             max_request_body_bytes,
+            job_poll_interval_milliseconds,
+            job_lease_timeout_seconds,
+            job_retry_base_seconds,
+            job_retry_max_seconds,
+            job_max_attempts,
+            job_worker_id: optional("JOB_WORKER_ID")?,
         })
     }
 }

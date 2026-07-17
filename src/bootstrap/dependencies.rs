@@ -8,7 +8,7 @@ use crate::{
     application::health::ReadinessCheck,
     application::user::{
         CreateUserUseCase, DeleteUserUseCase, GetUserUseCase, ListUsersUseCase, UpdateUserUseCase,
-        UserCache, UserRepository,
+        UserCache, UserRegistrationRepository, UserRepository,
     },
     config::Config,
     infrastructure::{
@@ -36,15 +36,18 @@ pub async fn build_dependencies(config: &Config) -> Result<Dependencies> {
         .context("could not run PostgreSQL migrations")?;
 
     let readiness: Arc<dyn ReadinessCheck> = Arc::new(PostgresReadinessCheck::new(pool.clone()));
-    let repository: Arc<dyn UserRepository> = Arc::new(PostgresUserRepository::new(pool));
+    let postgres_repository = Arc::new(PostgresUserRepository::new(pool));
+    let registration_repository: Arc<dyn UserRegistrationRepository> = postgres_repository.clone();
+    let repository: Arc<dyn UserRepository> = postgres_repository;
     let cache = build_cache(config).await?;
     let ttl = config.user_cache_ttl_seconds;
 
     let state = AppState {
         create_user: Arc::new(CreateUserUseCase::new(
-            repository.clone(),
+            registration_repository,
             cache.clone(),
             ttl,
+            config.job_max_attempts,
         )),
         get_user: Arc::new(GetUserUseCase::new(repository.clone(), cache.clone(), ttl)),
         list_users: Arc::new(ListUsersUseCase::new(repository.clone())),

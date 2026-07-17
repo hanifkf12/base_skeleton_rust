@@ -1,7 +1,10 @@
 use async_trait::async_trait;
 use thiserror::Error;
 
-use crate::domain::user::{User, UserId};
+use crate::{
+    application::job::NewJob,
+    domain::user::{User, UserId},
+};
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum RepositoryError {
@@ -22,6 +25,12 @@ pub trait UserRepository: Send + Sync {
     async fn list(&self, limit: u32, offset: u64) -> Result<Vec<User>, RepositoryError>;
     async fn update(&self, user: &User) -> Result<Option<User>, RepositoryError>;
     async fn delete(&self, id: UserId) -> Result<bool, RepositoryError>;
+}
+
+/// Persists a new user and its first background job atomically.
+#[async_trait]
+pub trait UserRegistrationRepository: Send + Sync {
+    async fn create_with_job(&self, user: &User, job: &NewJob) -> Result<User, RepositoryError>;
 }
 
 /// Cache misses are `Ok(None)`. All TTL values are whole seconds.

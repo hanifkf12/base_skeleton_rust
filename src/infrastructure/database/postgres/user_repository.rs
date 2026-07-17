@@ -4,7 +4,10 @@ use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
 use crate::{
-    application::user::{RepositoryError, UserRepository},
+    application::{
+        job::NewJob,
+        user::{RepositoryError, UserRegistrationRepository, UserRepository},
+    },
     domain::user::{DisplayName, Email, User, UserId},
 };
 
@@ -116,6 +119,51 @@ impl UserRepository for PostgresUserRepository {
             .await
             .map_err(map_sqlx_error)?;
         Ok(result.rows_affected() == 1)
+    }
+}
+
+#[async_trait]
+impl UserRegistrationRepository for PostgresUserRepository {
+    async fn create_with_job(&self, user: &User, job: &NewJob) -> Result<User, RepositoryError> {
+        let max_attempts = i32::try_from(job.max_attempts).map_err(|error| {
+            tracing::error!(%error, max_attempts = job.max_attempts, "max_attempts is too large");
+            RepositoryError::Unavailable
+        })?;
+        if max_attempts == 0 {
+            tracing::error!("max_attempts must be greater than zero");
+            return Err(RepositoryError::Unavailable);
+        }
+
+        let mut transaction = self.pool.begin().await.map_err(map_sqlx_error)?;
+
+        let created = sqlx::query_as::<_, UserRow>(
+            r#"INSERT INTO users (id, email, display_name, created_at, updated_at)
+               VALUES ($1, $2, $3, $4, $5)
+               RETURNING id, email, display_name, created_at, updated_at"#,
+        )
+        .bind(user.id().as_uuid())
+        .bind(user.email().as_str())
+        .bind(user.display_name().as_str())
+        .bind(user.created_at())
+        .bind(user.updated_at())
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        sqlx::query(
+            r#"INSERT INTO background_jobs (id, job_type, payload, max_attempts)
+               VALUES ($1, $2, $3, $4)"#,
+        )
+        .bind(job.id)
+        .bind(&job.job_type)
+        .bind(&job.payload)
+        .bind(max_attempts)
+        .execute(&mut *transaction)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        transaction.commit().await.map_err(map_sqlx_error)?;
+        created.into_domain()
     }
 }
 

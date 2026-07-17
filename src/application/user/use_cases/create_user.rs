@@ -1,25 +1,33 @@
 use std::sync::Arc;
 
-use crate::domain::user::{DisplayName, Email, User};
+use serde_json::json;
 
-use super::super::{ApplicationError, CreateUserInput, UserCache, UserRepository};
+use crate::{
+    application::job::{NewJob, USER_CREATED_JOB},
+    domain::user::{DisplayName, Email, User},
+};
+
+use super::super::{ApplicationError, CreateUserInput, UserCache, UserRegistrationRepository};
 
 pub struct CreateUserUseCase {
-    repository: Arc<dyn UserRepository>,
+    repository: Arc<dyn UserRegistrationRepository>,
     cache: Arc<dyn UserCache>,
     cache_ttl_seconds: u64,
+    job_max_attempts: u32,
 }
 
 impl CreateUserUseCase {
     pub fn new(
-        repository: Arc<dyn UserRepository>,
+        repository: Arc<dyn UserRegistrationRepository>,
         cache: Arc<dyn UserCache>,
         cache_ttl_seconds: u64,
+        job_max_attempts: u32,
     ) -> Self {
         Self {
             repository,
             cache,
             cache_ttl_seconds,
+            job_max_attempts,
         }
     }
 
@@ -28,7 +36,14 @@ impl CreateUserUseCase {
             Email::parse(input.email)?,
             DisplayName::parse(input.display_name)?,
         );
-        let created = self.repository.create(&user).await?;
+        let job = NewJob::new(
+            USER_CREATED_JOB,
+            json!({
+                "user_id": user.id().to_string(),
+            }),
+            self.job_max_attempts,
+        );
+        let created = self.repository.create_with_job(&user, &job).await?;
         let _ = self.cache.set(&created, self.cache_ttl_seconds).await;
         Ok(created)
     }
