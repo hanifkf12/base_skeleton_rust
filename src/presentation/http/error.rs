@@ -84,6 +84,20 @@ struct ErrorBody {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
+        if self.status.is_server_error() {
+            tracing::error!(
+                http.response.status_code = self.status.as_u16(),
+                error.code = self.code,
+                "request failed"
+            );
+        } else {
+            tracing::warn!(
+                http.response.status_code = self.status.as_u16(),
+                error.code = self.code,
+                "request rejected"
+            );
+        }
+
         (
             self.status,
             Json(ErrorEnvelope {

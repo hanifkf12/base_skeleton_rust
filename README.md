@@ -118,7 +118,7 @@ Every response includes an `x-request-id`. Authorization and cookie headers are 
 
 ## Observability with SigNoz
 
-Logs are structured JSON on stdout. Within HTTP and job spans they include `trace_id` and `span_id` fields for SigNoz log/trace correlation; configure your SigNoz OpenTelemetry Collector (or its Kubernetes/Docker agent) to collect container stdout as logs. Trace export is opt-in so local development works without a collector:
+Logs are structured JSON on stdout and are also exported directly to SigNoz through OTLP. The log bridge includes the active trace and span context, so SigNoz can correlate each log record with its trace. Export is opt-in so local development works without a collector:
 
 ```bash
 # Self-hosted SigNoz OTLP/HTTP
@@ -129,7 +129,7 @@ OTEL_SERVICE_NAME=base-skeleton-rust
 OTEL_EXPORTER_OTLP_HEADERS=signoz-ingestion-key=your-ingestion-key
 ```
 
-The service accepts W3C `traceparent` and `tracestate` headers, exports HTTP spans through OTLP, and stores the resulting trace context with every durable job. The worker restores that context before handling the job, so an HTTP request and its asynchronous work appear in one distributed trace. Job payloads, authorization headers, cookies, and request bodies are never added to spans.
+The service accepts W3C `traceparent` and `tracestate` headers, exports traces to `/v1/traces` and logs to `/v1/logs`, and stores the resulting trace context with every durable job. The worker restores that context before handling the job, so an HTTP request and its asynchronous work appear in one distributed trace. Job payloads, authorization headers, cookies, and request bodies are never added to spans or logs.
 
 For self-hosted deployments, OTLP/HTTP is normally exposed on port `4318`; use the regional ingest endpoint supplied by SigNoz Cloud for cloud deployments. See the [SigNoz Rust instrumentation guide](https://signoz.io/docs/instrumentation/opentelemetry-rust/) and [self-hosted ingestion overview](https://signoz.io/docs/ingestion/self-hosted/overview/).
 
@@ -144,7 +144,7 @@ For self-hosted deployments, OTLP/HTTP is normally exposed on port `4318`; use t
    cargo run -- all
    ```
 
-2. Send a request. The application writes JSON logs to stdout and exports its trace asynchronously:
+2. Send a request. The application writes JSON logs to stdout and exports both logs and traces asynchronously:
 
    ```bash
    curl -i -X POST http://localhost:3000/api/v1/users \
@@ -174,9 +174,9 @@ Creating a user also saves W3C trace context with `user.created`. When the worke
 
 ### Propagation, collection, and safety
 
-Clients or upstream services should forward W3C `traceparent` and optional `tracestate` headers. This service extracts them for incoming requests and uses them as the parent trace context. Configure the SigNoz Collector to read the service/container stdout as JSON logs; SigNoz can then correlate the `trace_id` and `span_id` fields with OTLP traces.
+Clients or upstream services should forward W3C `traceparent` and optional `tracestate` headers. This service extracts them for incoming requests and uses them as the parent trace context. The OTLP log bridge sends `tracing` events directly to SigNoz and includes their active trace context; stdout JSON remains available for local development or a second log pipeline.
 
-Only safe operational fields are recorded: method, path, status, user ID, page values, job ID/type, cache TTL, and database/cache system. The application intentionally excludes request bodies, emails, display names, job payloads, authorization headers, cookies, SQL parameters, and connection strings.
+Only safe operational fields are recorded: method, path, status, error code, user ID, page values, job ID/type, cache TTL, and database/cache system. HTTP 5xx responses are marked as error spans, while expected 4xx responses produce warning logs without turning the server span into an error. The application intentionally excludes request bodies, emails, display names, job payloads, authorization headers, cookies, SQL parameters, and connection strings.
 
 ## Checks
 

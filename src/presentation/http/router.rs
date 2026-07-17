@@ -57,10 +57,12 @@ pub fn build_router(
                             |response: &axum::response::Response,
                              _latency: Duration,
                              span: &tracing::Span| {
-                                span.record(
-                                    "http.response.status_code",
-                                    response.status().as_u16(),
-                                );
+                                let status = response.status();
+                                span.record("http.response.status_code", status.as_u16());
+                                if status.is_server_error() {
+                                    span.record("otel.status_code", "ERROR");
+                                    span.record("otel.status_description", status.to_string());
+                                }
                             },
                         ),
                 )

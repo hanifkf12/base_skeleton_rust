@@ -6,9 +6,11 @@ use opentelemetry::{
     propagation::Extractor,
     trace::{TraceContextExt, TracerProvider},
 };
-use opentelemetry_otlp::SpanExporter;
+use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
+use opentelemetry_otlp::{LogExporter, SpanExporter};
 use opentelemetry_sdk::{
     Resource,
+    logs::{SdkLoggerProvider, log_processor_with_async_runtime::BatchLogProcessor},
     propagation::TraceContextPropagator,
     runtime,
     trace::{SdkTracerProvider, span_processor_with_async_runtime::BatchSpanProcessor},
@@ -16,16 +18,22 @@ use opentelemetry_sdk::{
 use serde_json::{Value, json};
 use tracing::Span;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::application::job::ClaimedJob;
 
 pub struct TelemetryGuard {
     tracer_provider: Option<SdkTracerProvider>,
+    logger_provider: Option<SdkLoggerProvider>,
 }
 
 impl TelemetryGuard {
     pub fn shutdown(self) {
+        if let Some(provider) = self.logger_provider
+            && let Err(error) = provider.shutdown()
+        {
+            eprintln!("failed to flush OpenTelemetry logs: {error}");
+        }
         if let Some(provider) = self.tracer_provider
             && let Err(error) = provider.shutdown()
         {
@@ -49,16 +57,22 @@ pub fn init() -> Result<TelemetryGuard> {
         .ok()
         .filter(|value| !value.trim().is_empty());
 
-    let tracer_provider = if endpoint.is_some() {
+    let (tracer_provider, logger_provider) = if endpoint.is_some() {
         // Let the OTLP exporter read the generic endpoint from the environment.
         // It appends `/v1/traces` for `OTEL_EXPORTER_OTLP_ENDPOINT`, whereas a
         // programmatic endpoint is treated as an already-complete signal URL.
         let exporter = SpanExporter::builder().with_http().build()?;
         let service_name =
             env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| env!("CARGO_PKG_NAME").to_owned());
+        let resource = Resource::builder().with_service_name(service_name).build();
         let provider = SdkTracerProvider::builder()
             .with_span_processor(BatchSpanProcessor::builder(exporter, runtime::Tokio).build())
-            .with_resource(Resource::builder().with_service_name(service_name).build())
+            .with_resource(resource.clone())
+            .build();
+        let log_exporter = LogExporter::builder().with_http().build()?;
+        let logger_provider = SdkLoggerProvider::builder()
+            .with_log_processor(BatchLogProcessor::builder(log_exporter, runtime::Tokio).build())
+            .with_resource(resource)
             .build();
         let tracer = provider.tracer(env!("CARGO_PKG_NAME"));
         global::set_tracer_provider(provider.clone());
@@ -66,21 +80,31 @@ pub fn init() -> Result<TelemetryGuard> {
             .with(filter)
             .with(logs)
             .with(tracing_opentelemetry::layer().with_tracer(tracer))
+            .with(
+                OpenTelemetryTracingBridge::new(&logger_provider).with_filter(
+                    tracing_subscriber::filter::filter_fn(|metadata| {
+                        !metadata.target().starts_with("opentelemetry")
+                    }),
+                ),
+            )
             .init();
-        tracing::info!("OpenTelemetry trace export enabled");
-        Some(provider)
+        tracing::info!("OpenTelemetry trace and log export enabled");
+        (Some(provider), Some(logger_provider))
     } else {
         tracing_subscriber::registry()
             .with(filter)
             .with(logs)
             .init();
         tracing::info!(
-            "OpenTelemetry trace export disabled; set OTEL_EXPORTER_OTLP_ENDPOINT to enable it"
+            "OpenTelemetry trace and log export disabled; set OTEL_EXPORTER_OTLP_ENDPOINT to enable it"
         );
-        None
+        (None, None)
     };
 
-    Ok(TelemetryGuard { tracer_provider })
+    Ok(TelemetryGuard {
+        tracer_provider,
+        logger_provider,
+    })
 }
 
 pub fn current_trace_context() -> Value {
@@ -117,6 +141,8 @@ pub fn http_span<B>(request: &axum::http::Request<B>) -> Span {
         http.request.method = %request.method(),
         url.path = %request.uri().path(),
         http.response.status_code = tracing::field::Empty,
+        otel.status_code = tracing::field::Empty,
+        otel.status_description = tracing::field::Empty,
         trace_id = tracing::field::Empty,
         span_id = tracing::field::Empty,
     );

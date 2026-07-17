@@ -808,7 +808,7 @@ The worker is an inbound adapter like HTTP presentation: it receives work from a
 
 ### Distributed tracing and logs
 
-`src/telemetry/mod.rs` configures JSON logs on stdout and optional OTLP trace export. Set `OTEL_EXPORTER_OTLP_ENDPOINT` to enable the exporter and `OTEL_SERVICE_NAME` to name the service in SigNoz. For SigNoz Cloud, set `OTEL_EXPORTER_OTLP_HEADERS` to `signoz-ingestion-key=<key>`.
+`src/telemetry/mod.rs` configures JSON logs on stdout plus OTLP trace and log export. Set `OTEL_EXPORTER_OTLP_ENDPOINT` to enable the exporter and `OTEL_SERVICE_NAME` to name the service in SigNoz. The standard generic endpoint automatically resolves to `/v1/traces` and `/v1/logs`. For SigNoz Cloud, set `OTEL_EXPORTER_OTLP_HEADERS` to `signoz-ingestion-key=<key>`.
 
 HTTP spans extract W3C `traceparent` and `tracestate` headers. When a use case creates a durable job, it saves the current W3C context in `background_jobs.trace_context`. `JobWorker` extracts that context and makes the handler execution a consumer span, preserving the parent trace across the database boundary. Keep job payloads, credentials, cookies, and request bodies out of span fields and logs.
 
@@ -839,7 +839,7 @@ pub async fn execute(&self, order_id: OrderId, input: CreateOrderInput) -> Resul
 
 For a new HTTP endpoint, add the presentation span on the handler, then add its child application span and spans on each concrete infrastructure adapter it calls. The `TraceLayer` root span automatically keeps them under the same request and records the final `http.response.status_code`. For a background job, `JobWorker` already creates `job.process`; handler and adapter spans will become its children.
 
-The application outputs JSON logs to stdout. Under an active HTTP or job span, logs expose `trace_id` and `span_id` in the current span data. Configure the SigNoz Collector to ingest stdout JSON logs, then use those IDs to correlate logs with OTLP traces. Use `RUST_LOG=base_skeleton_rust=info,tower_http=info` for production and temporarily raise a component to `debug` while investigating an issue.
+The application outputs JSON logs to stdout and bridges every enabled `tracing` event to OTLP logs. The bridge attaches the active HTTP/job trace and span context, so SigNoz correlates logs with OTLP traces directly. HTTP 5xx responses set the root span status to `ERROR`; mapped 4xx responses emit a warning log with safe status and error-code fields. Use `RUST_LOG=base_skeleton_rust=info,tower_http=info` for production and temporarily raise a component to `debug` while investigating an issue.
 
 ### Job lifecycle
 
