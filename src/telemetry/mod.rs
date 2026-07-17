@@ -6,8 +6,13 @@ use opentelemetry::{
     propagation::Extractor,
     trace::{TraceContextExt, TracerProvider},
 };
-use opentelemetry_otlp::{SpanExporter, WithExportConfig};
-use opentelemetry_sdk::{Resource, propagation::TraceContextPropagator, trace::SdkTracerProvider};
+use opentelemetry_otlp::SpanExporter;
+use opentelemetry_sdk::{
+    Resource,
+    propagation::TraceContextPropagator,
+    runtime,
+    trace::{SdkTracerProvider, span_processor_with_async_runtime::BatchSpanProcessor},
+};
 use serde_json::{Value, json};
 use tracing::Span;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -44,15 +49,15 @@ pub fn init() -> Result<TelemetryGuard> {
         .ok()
         .filter(|value| !value.trim().is_empty());
 
-    let tracer_provider = if let Some(endpoint) = endpoint {
-        let exporter = SpanExporter::builder()
-            .with_http()
-            .with_endpoint(endpoint)
-            .build()?;
+    let tracer_provider = if endpoint.is_some() {
+        // Let the OTLP exporter read the generic endpoint from the environment.
+        // It appends `/v1/traces` for `OTEL_EXPORTER_OTLP_ENDPOINT`, whereas a
+        // programmatic endpoint is treated as an already-complete signal URL.
+        let exporter = SpanExporter::builder().with_http().build()?;
         let service_name =
             env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| env!("CARGO_PKG_NAME").to_owned());
         let provider = SdkTracerProvider::builder()
-            .with_batch_exporter(exporter)
+            .with_span_processor(BatchSpanProcessor::builder(exporter, runtime::Tokio).build())
             .with_resource(Resource::builder().with_service_name(service_name).build())
             .build();
         let tracer = provider.tracer(env!("CARGO_PKG_NAME"));
