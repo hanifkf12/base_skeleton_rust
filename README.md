@@ -107,6 +107,8 @@ This service validates externally issued JWT access tokens; it does not store pa
 - `OIDC_AUDIENCE` (required for `http` and `all`): dedicated API audience.
 - `OIDC_ALLOWED_ALGORITHMS` (optional, default `RS256`): comma-delimited asymmetric signing algorithms.
 
+For a complete local Keycloak and Postman walkthrough, see [Keycloak Setup Guide](docs/keycloak-setup.md).
+
 At HTTP startup, the service loads discovery metadata and the initial JWKS. Startup fails if either is unavailable or invalid. Signing keys are cached; an unknown `kid` triggers at most one refresh per 60 seconds. Existing cached keys keep working during a provider outage. Provider calls use a fixed five-second timeout and token time checks allow 30 seconds of clock skew.
 
 Tokens must have a signature from a discovered signing key, an allowed algorithm, matching `iss` and `aud`, valid `exp` and optional `nbf` timestamps, a non-empty `sub`, and a standard space-delimited `scope` claim. Authentication failures use the existing JSON error envelope plus a `WWW-Authenticate: Bearer` challenge.
