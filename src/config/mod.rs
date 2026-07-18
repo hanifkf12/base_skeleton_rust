@@ -20,6 +20,13 @@ pub struct Config {
     pub job_worker_id: Option<String>,
 }
 
+#[derive(Clone)]
+pub struct OidcConfig {
+    pub issuer_url: String,
+    pub audience: String,
+    pub allowed_algorithms: Vec<String>,
+}
+
 impl Config {
     pub fn from_env() -> Result<Self> {
         let host = env::var("APP_HOST").unwrap_or_else(|_| "0.0.0.0".to_owned());
@@ -102,8 +109,39 @@ impl Config {
     }
 }
 
+impl OidcConfig {
+    pub fn from_env() -> Result<Self> {
+        let issuer_url = required_non_empty("OIDC_ISSUER_URL")?;
+        let audience = required_non_empty("OIDC_AUDIENCE")?;
+        let algorithms = env::var("OIDC_ALLOWED_ALGORITHMS").unwrap_or_else(|_| "RS256".to_owned());
+        let allowed_algorithms = algorithms
+            .split(',')
+            .map(str::trim)
+            .filter(|algorithm| !algorithm.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+
+        ensure!(
+            !allowed_algorithms.is_empty(),
+            "OIDC_ALLOWED_ALGORITHMS must contain at least one algorithm"
+        );
+
+        Ok(Self {
+            issuer_url,
+            audience,
+            allowed_algorithms,
+        })
+    }
+}
+
 fn required(name: &str) -> Result<String> {
     env::var(name).with_context(|| format!("required environment variable {name} is missing"))
+}
+
+fn required_non_empty(name: &str) -> Result<String> {
+    let value = required(name)?;
+    ensure!(!value.trim().is_empty(), "{name} must not be empty");
+    Ok(value)
 }
 
 fn optional(name: &str) -> Result<Option<String>> {

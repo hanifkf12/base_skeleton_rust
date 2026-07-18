@@ -8,7 +8,7 @@ use anyhow::Result;
 
 use crate::{
     cli::{Command, DatabaseCommand},
-    config::Config,
+    config::{Config, OidcConfig},
 };
 
 pub async fn run(command: Command) -> Result<()> {
@@ -22,9 +22,10 @@ pub async fn run(command: Command) -> Result<()> {
 
 async fn run_http() -> Result<()> {
     let config = Config::from_env()?;
+    let oidc_config = OidcConfig::from_env()?;
     let (sender, receiver) = shutdown::channel();
     let signal_task = tokio::spawn(shutdown::notify_on_signal(sender));
-    let result = http::run(config, receiver).await;
+    let result = http::run(config, oidc_config, receiver).await;
     signal_task.abort();
     result
 }
@@ -44,9 +45,10 @@ async fn run_all(run_migrations: bool) -> Result<()> {
     }
 
     let config = Config::from_env()?;
+    let oidc_config = OidcConfig::from_env()?;
     let (sender, receiver) = shutdown::channel();
     let signal_task = tokio::spawn(shutdown::notify_on_signal(sender.clone()));
-    let http = http::run(config.clone(), receiver.clone());
+    let http = http::run(config.clone(), oidc_config, receiver.clone());
     let worker = worker::run(config, receiver);
     tokio::pin!(http, worker);
 

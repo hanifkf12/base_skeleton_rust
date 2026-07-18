@@ -11,6 +11,8 @@ cargo run -- db migrate
 cargo run -- all
 ```
 
+Before running `http` or `all`, replace the example OIDC values in `.env` by following [Set up authorization](#set-up-authorization). The values in `.env.example` are placeholders and cannot authenticate requests.
+
 `all` runs HTTP and the worker in one process for local or simple deployments. To run them as independently scalable production processes:
 
 ```bash
@@ -19,6 +21,8 @@ cargo run -- worker
 ```
 
 Runtime commands do not change the database schema. Run `db migrate` as a deployment step before starting HTTP or workers. The API listens on `http://localhost:3000` by default. Redis is not required for jobs; omit `REDIS_URL` if you do not want the optional user cache.
+
+The HTTP server is an OIDC resource server. Before starting `http` or `all`, set `OIDC_ISSUER_URL` to an issuer with discovery/JWKS support and set `OIDC_AUDIENCE` to this API's dedicated audience. These variables are intentionally not read by `worker` or `db` commands.
 
 ## Commands
 
@@ -93,6 +97,105 @@ Keep each worker ID unique. `JOB_LEASE_TIMEOUT_SECONDS` must be longer than the 
 | `PUT` | `/api/v1/users/{id}` | Update a user |
 | `DELETE` | `/api/v1/users/{id}` | Delete a user |
 
+Health endpoints are public. Every users endpoint requires a Bearer JWT access token issued by `OIDC_ISSUER_URL` for `OIDC_AUDIENCE`: `GET` and `HEAD` require `users:read`, while `POST`, `PUT`, and `DELETE` require `users:write`.
+
+## OIDC access tokens
+
+This service validates externally issued JWT access tokens; it does not store passwords, redirect browsers, issue tokens, or refresh tokens. Configure:
+
+- `OIDC_ISSUER_URL` (required for `http` and `all`): exact expected issuer and discovery base URL.
+- `OIDC_AUDIENCE` (required for `http` and `all`): dedicated API audience.
+- `OIDC_ALLOWED_ALGORITHMS` (optional, default `RS256`): comma-delimited asymmetric signing algorithms.
+
+At HTTP startup, the service loads discovery metadata and the initial JWKS. Startup fails if either is unavailable or invalid. Signing keys are cached; an unknown `kid` triggers at most one refresh per 60 seconds. Existing cached keys keep working during a provider outage. Provider calls use a fixed five-second timeout and token time checks allow 30 seconds of clock skew.
+
+Tokens must have a signature from a discovered signing key, an allowed algorithm, matching `iss` and `aud`, valid `exp` and optional `nbf` timestamps, a non-empty `sub`, and a standard space-delimited `scope` claim. Authentication failures use the existing JSON error envelope plus a `WWW-Authenticate: Bearer` challenge.
+
+### Set up authorization
+
+This API is an OAuth 2.0/OIDC resource server. Use an identity provider such as Keycloak, Auth0, Microsoft Entra ID, Okta, or another provider that issues signed JWT access tokens and publishes OIDC discovery/JWKS metadata.
+
+1. Create an API resource in the provider with a dedicated audience, for example `base-skeleton-api`.
+2. Create the OAuth scopes `users:read` and `users:write`. Assign them to the users, groups, roles, or service account that should administer this API. If the provider uses roles internally, configure its token claim mapping so the issued access token has a space-delimited `scope` claim containing these values.
+3. Configure the provider to issue JWT **access tokens** for this audience, signed with an asymmetric algorithm such as `RS256`, and expose a JWKS through OIDC discovery. Do not use opaque access tokens or ID tokens for this API.
+4. Create a client to obtain tokens. For server-to-server use, create a confidential client with the client-credentials grant and assign the required scopes. For user-driven applications, use your provider's normal authorization-code-with-PKCE flow; this API only receives the resulting access token.
+5. Find the issuer URL in the provider's discovery document. The configured value must exactly match the document's `issuer` field. For an issuer such as `https://id.example.com/realms/demo`, its discovery URL is normally:
+
+   ```text
+   https://id.example.com/realms/demo/.well-known/openid-configuration
+   ```
+
+6. Set the matching values in `.env`:
+
+   ```dotenv
+   OIDC_ISSUER_URL=https://id.example.com/realms/demo
+   OIDC_AUDIENCE=base-skeleton-api
+   OIDC_ALLOWED_ALGORITHMS=RS256
+   ```
+
+   If the provider signs tokens with several asymmetric algorithms, list them comma-separated, for example `RS256,ES256`. HMAC algorithms are intentionally not supported.
+
+7. Start the dependencies and API:
+
+   ```bash
+   docker compose up -d
+   cargo run -- db migrate
+   cargo run -- http
+   ```
+
+   Startup confirms the discovery document and initial JWKS are available. A failure here usually means the issuer URL is wrong, the provider is unreachable, or no compatible signing keys are published.
+
+### Obtain a token and call the API
+
+For a client-credentials client, set the client credentials in your shell (use your secret manager or CI secret store outside local development), then obtain a token from the `token_endpoint` in the discovery document:
+
+```bash
+export OIDC_CLIENT_ID=your-client-id
+export OIDC_CLIENT_SECRET=your-client-secret
+```
+
+The exact token endpoint and optional provider-specific fields differ by provider, but the standard request is:
+
+```bash
+ACCESS_TOKEN="$(curl --fail --silent --show-error \
+  --request POST "https://id.example.com/realms/demo/protocol/openid-connect/token" \
+  --header 'content-type: application/x-www-form-urlencoded' \
+  --data-urlencode 'grant_type=client_credentials' \
+  --data-urlencode "client_id=$OIDC_CLIENT_ID" \
+  --data-urlencode "client_secret=$OIDC_CLIENT_SECRET" \
+  --data-urlencode 'scope=users:read users:write' \
+  | jq -r '.access_token')"
+```
+
+Keep client secrets and access tokens out of source control, shell history where possible, and logs. Some providers require an additional `audience` or `resource` parameter; set it to the same value as `OIDC_AUDIENCE` when required by that provider.
+
+Send the access token in the standard Authorization header:
+
+```bash
+# Public endpoint: no token needed.
+curl -i http://localhost:3000/health/ready
+
+# Requires users:read.
+curl -i http://localhost:3000/api/v1/users \
+  --header "authorization: Bearer $ACCESS_TOKEN"
+
+# Requires users:write.
+curl -i --request POST http://localhost:3000/api/v1/users \
+  --header "authorization: Bearer $ACCESS_TOKEN" \
+  --header 'content-type: application/json' \
+  --data '{"email":"ada@example.com","display_name":"Ada Lovelace"}'
+```
+
+| Response | Meaning | Usual resolution |
+| --- | --- | --- |
+| `401 unauthorized` | Missing, malformed, expired, or invalid token | Obtain a new access token and check issuer, audience, signing algorithm, and clock. |
+| `403 insufficient_scope` | Valid token lacks the endpoint's scope | Assign `users:read` or `users:write` in the provider, then obtain a new token. |
+| `503 authentication_unavailable` | An unknown signing key required a JWKS refresh while the provider was unavailable | Restore provider connectivity and retry; tokens using already cached keys continue to work. |
+
+### Protecting future API routes
+
+Keep authorization at the HTTP boundary. Add a new route to the read or write router in `src/presentation/http/router.rs`, then attach the appropriate `ScopeRequirement` middleware. Use `users:read` for safe read routes and `users:write` for state-changing routes. Add an HTTP test for missing credentials, allowed scope, and insufficient scope. Do not authorize by trusting client-supplied user IDs or by parsing JWTs inside handlers; the middleware supplies a verified `AuthenticatedPrincipal` in request extensions.
+
 Create and update bodies use this shape:
 
 ```json
@@ -148,6 +251,7 @@ For self-hosted deployments, OTLP/HTTP is normally exposed on port `4318`; use t
 
    ```bash
    curl -i -X POST http://localhost:3000/api/v1/users \
+     -H 'authorization: Bearer <access-token-with-users:write>' \
      -H 'content-type: application/json' \
      -d '{"email":"ada@example.com","display_name":"Ada Lovelace"}'
    ```

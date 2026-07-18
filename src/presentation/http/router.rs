@@ -4,6 +4,7 @@ use axum::{
     Router,
     extract::DefaultBodyLimit,
     http::{StatusCode, header},
+    middleware,
     routing::{get, post},
 };
 use tower::ServiceBuilder;
@@ -14,26 +15,43 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-use crate::application::health::ReadinessCheck;
+use crate::application::{auth::AccessTokenVerifier, health::ReadinessCheck};
 
 use super::{
-    AppState, health,
+    AppState,
+    auth::{ScopeRequirement, require_scope},
+    health,
     user::{create_user, delete_user, get_user, list_users, update_user},
 };
 
 pub fn build_router(
     state: AppState,
     readiness: Arc<dyn ReadinessCheck>,
+    access_token_verifier: Arc<dyn AccessTokenVerifier>,
     request_timeout_seconds: u64,
     max_request_body_bytes: usize,
 ) -> Router {
     let request_id_header = header::HeaderName::from_static("x-request-id");
-    let api = Router::new()
-        .route("/api/v1/users", post(create_user).get(list_users))
+    let read_api = Router::new()
+        .route("/api/v1/users", get(list_users))
+        .route("/api/v1/users/{id}", get(get_user))
+        .route_layer(middleware::from_fn_with_state(
+            ScopeRequirement::new(access_token_verifier.clone(), "users:read"),
+            require_scope,
+        ));
+    let write_api = Router::new()
+        .route("/api/v1/users", post(create_user))
         .route(
             "/api/v1/users/{id}",
-            get(get_user).put(update_user).delete(delete_user),
+            axum::routing::put(update_user).delete(delete_user),
         )
+        .route_layer(middleware::from_fn_with_state(
+            ScopeRequirement::new(access_token_verifier, "users:write"),
+            require_scope,
+        ));
+    let api = Router::new()
+        .merge(read_api)
+        .merge(write_api)
         .with_state(state);
 
     Router::new()

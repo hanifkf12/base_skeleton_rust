@@ -1,7 +1,7 @@
 use axum::{
     Json,
     extract::rejection::{JsonRejection, QueryRejection},
-    http::StatusCode,
+    http::{HeaderValue, StatusCode, header},
     response::IntoResponse,
 };
 use serde::Serialize;
@@ -12,6 +12,7 @@ pub struct ApiError {
     status: StatusCode,
     code: &'static str,
     message: String,
+    www_authenticate: Option<HeaderValue>,
 }
 
 impl ApiError {
@@ -20,6 +21,59 @@ impl ApiError {
             status: StatusCode::BAD_REQUEST,
             code: "invalid_user_id",
             message: "user id must be a valid UUID".to_owned(),
+            www_authenticate: None,
+        }
+    }
+
+    pub fn unauthorized() -> Self {
+        Self::authentication_error(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "a Bearer access token is required",
+            "Bearer",
+        )
+    }
+
+    pub fn invalid_token() -> Self {
+        Self::authentication_error(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "the Bearer access token is invalid",
+            "Bearer error=\"invalid_token\"",
+        )
+    }
+
+    pub fn insufficient_scope(scope: &'static str) -> Self {
+        Self::authentication_error(
+            StatusCode::FORBIDDEN,
+            "insufficient_scope",
+            "the access token does not grant the required scope",
+            &format!("Bearer error=\"insufficient_scope\", scope=\"{scope}\""),
+        )
+    }
+
+    pub fn authentication_unavailable() -> Self {
+        Self::authentication_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "authentication_unavailable",
+            "access token verification is temporarily unavailable",
+            "Bearer",
+        )
+    }
+
+    fn authentication_error(
+        status: StatusCode,
+        code: &'static str,
+        message: &str,
+        challenge: &str,
+    ) -> Self {
+        Self {
+            status,
+            code,
+            message: message.to_owned(),
+            www_authenticate: Some(
+                HeaderValue::from_str(challenge).expect("authentication challenge is valid"),
+            ),
         }
     }
 
@@ -28,6 +82,7 @@ impl ApiError {
             status: StatusCode::BAD_REQUEST,
             code,
             message,
+            www_authenticate: None,
         }
     }
 }
@@ -51,21 +106,25 @@ impl From<ApplicationError> for ApiError {
                 status: StatusCode::UNPROCESSABLE_ENTITY,
                 code: "validation_failed",
                 message: error.to_string(),
+                www_authenticate: None,
             },
             ApplicationError::NotFound => Self {
                 status: StatusCode::NOT_FOUND,
                 code: "user_not_found",
                 message: error.to_string(),
+                www_authenticate: None,
             },
             ApplicationError::EmailAlreadyExists => Self {
                 status: StatusCode::CONFLICT,
                 code: "email_already_exists",
                 message: error.to_string(),
+                www_authenticate: None,
             },
             ApplicationError::DependencyUnavailable => Self {
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 code: "service_unavailable",
                 message: error.to_string(),
+                www_authenticate: None,
             },
         }
     }
@@ -98,7 +157,7 @@ impl IntoResponse for ApiError {
             );
         }
 
-        (
+        let mut response = (
             self.status,
             Json(ErrorEnvelope {
                 error: ErrorBody {
@@ -107,7 +166,13 @@ impl IntoResponse for ApiError {
                 },
             }),
         )
-            .into_response()
+            .into_response();
+        if let Some(challenge) = self.www_authenticate {
+            response
+                .headers_mut()
+                .insert(header::WWW_AUTHENTICATE, challenge);
+        }
+        response
     }
 }
 
