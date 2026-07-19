@@ -18,6 +18,7 @@ pub struct Config {
     pub job_retry_max_seconds: u64,
     pub job_max_attempts: u32,
     pub job_worker_id: Option<String>,
+    pub job_completed_retention_seconds: u64,
 }
 
 #[derive(Clone)]
@@ -44,6 +45,7 @@ impl Config {
         let job_retry_base_seconds = parse_or("JOB_RETRY_BASE_SECONDS", 5)?;
         let job_retry_max_seconds = parse_or("JOB_RETRY_MAX_SECONDS", 300)?;
         let job_max_attempts = parse_or("JOB_MAX_ATTEMPTS", 5)?;
+        let job_completed_retention_seconds = parse_or("JOB_COMPLETED_RETENTION_SECONDS", 86_400)?;
 
         ensure!(
             database_max_connections > 0,
@@ -85,6 +87,10 @@ impl Config {
             job_max_attempts > 0,
             "JOB_MAX_ATTEMPTS must be greater than zero"
         );
+        ensure!(
+            job_completed_retention_seconds > 0,
+            "JOB_COMPLETED_RETENTION_SECONDS must be greater than zero"
+        );
 
         Ok(Self {
             server_address,
@@ -101,6 +107,7 @@ impl Config {
             job_retry_max_seconds,
             job_max_attempts,
             job_worker_id: optional("JOB_WORKER_ID")?,
+            job_completed_retention_seconds,
         })
     }
 

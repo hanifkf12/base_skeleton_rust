@@ -9,6 +9,7 @@ use crate::{
     application::job::{JobHandler, JobQueue, JobWorker, RunOutcome},
     config::Config,
     infrastructure::{database::postgres::PostgresJobQueue, job::UserCreatedHandler},
+    telemetry::OpenTelemetryJobTracer,
 };
 
 use super::shutdown;
@@ -22,6 +23,7 @@ pub async fn run(config: Config, mut shutdown_receiver: watch::Receiver<bool>) -
 
     let queue: Arc<dyn JobQueue> = Arc::new(PostgresJobQueue::new(pool));
     let handlers: Vec<Arc<dyn JobHandler>> = vec![Arc::new(UserCreatedHandler)];
+    let tracer = Arc::new(OpenTelemetryJobTracer);
     let worker_id = config
         .job_worker_id
         .unwrap_or_else(|| format!("worker-{}", Uuid::new_v4()));
@@ -29,10 +31,12 @@ pub async fn run(config: Config, mut shutdown_receiver: watch::Receiver<bool>) -
     let worker = JobWorker::new(
         queue,
         handlers,
+        tracer,
         worker_id.clone(),
         Duration::from_secs(config.job_lease_timeout_seconds),
         Duration::from_secs(config.job_retry_base_seconds),
         Duration::from_secs(config.job_retry_max_seconds),
+        Duration::from_secs(config.job_completed_retention_seconds),
     );
 
     tracing::info!(%worker_id, "PostgreSQL job worker started");

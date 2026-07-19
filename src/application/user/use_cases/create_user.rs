@@ -7,11 +7,14 @@ use crate::{
     domain::user::{DisplayName, Email, User},
 };
 
-use super::super::{ApplicationError, CreateUserInput, UserCache, UserRegistrationRepository};
+use super::super::{
+    ApplicationError, CreateUserInput, TraceContextProvider, UserCache, UserRegistrationRepository,
+};
 
 pub struct CreateUserUseCase {
     repository: Arc<dyn UserRegistrationRepository>,
     cache: Arc<dyn UserCache>,
+    trace_context: Arc<dyn TraceContextProvider>,
     cache_ttl_seconds: u64,
     job_max_attempts: u32,
 }
@@ -20,12 +23,14 @@ impl CreateUserUseCase {
     pub fn new(
         repository: Arc<dyn UserRegistrationRepository>,
         cache: Arc<dyn UserCache>,
+        trace_context: Arc<dyn TraceContextProvider>,
         cache_ttl_seconds: u64,
         job_max_attempts: u32,
     ) -> Self {
         Self {
             repository,
             cache,
+            trace_context,
             cache_ttl_seconds,
             job_max_attempts,
         }
@@ -44,7 +49,7 @@ impl CreateUserUseCase {
             }),
             self.job_max_attempts,
         )
-        .with_trace_context(crate::telemetry::current_trace_context());
+        .with_trace_context(self.trace_context.current());
         let created = self.repository.create_with_job(&user, &job).await?;
         let _ = self.cache.set(&created, self.cache_ttl_seconds).await;
         Ok(created)

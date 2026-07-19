@@ -48,8 +48,15 @@ async fn run_all(run_migrations: bool) -> Result<()> {
     let oidc_config = OidcConfig::from_env()?;
     let (sender, receiver) = shutdown::channel();
     let signal_task = tokio::spawn(shutdown::notify_on_signal(sender.clone()));
-    let http = http::run(config.clone(), oidc_config, receiver.clone());
-    let worker = worker::run(config, receiver);
+
+    let half_connections = (config.database_max_connections / 2).max(1);
+    let mut http_config = config.clone();
+    http_config.database_max_connections = half_connections;
+    let mut worker_config = config.clone();
+    worker_config.database_max_connections = config.database_max_connections - half_connections;
+
+    let http = http::run(http_config, oidc_config, receiver.clone());
+    let worker = worker::run(worker_config, receiver);
     tokio::pin!(http, worker);
 
     let result = tokio::select! {

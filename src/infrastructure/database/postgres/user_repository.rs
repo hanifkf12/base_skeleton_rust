@@ -87,7 +87,7 @@ impl UserRepository for PostgresUserRepository {
     async fn list(&self, limit: u32, offset: u64) -> Result<Vec<User>, RepositoryError> {
         let rows = sqlx::query_as::<_, UserRow>(
             r#"SELECT id, email, display_name, created_at, updated_at
-               FROM users ORDER BY created_at DESC LIMIT $1 OFFSET $2"#,
+               FROM users ORDER BY created_at DESC, id DESC LIMIT $1 OFFSET $2"#,
         )
         .bind(i64::from(limit))
         .bind(i64::try_from(offset).unwrap_or(i64::MAX))
@@ -99,16 +99,21 @@ impl UserRepository for PostgresUserRepository {
     }
 
     #[tracing::instrument(name = "infrastructure.postgres.user.update", skip(self, user), fields(db.system = "postgresql", user.id = %user.id()))]
-    async fn update(&self, user: &User) -> Result<Option<User>, RepositoryError> {
+    async fn update(
+        &self,
+        user: &User,
+        expected_updated_at: &DateTime<Utc>,
+    ) -> Result<Option<User>, RepositoryError> {
         sqlx::query_as::<_, UserRow>(
             r#"UPDATE users SET email = $2, display_name = $3, updated_at = $4
-               WHERE id = $1
+               WHERE id = $1 AND updated_at = $5
                RETURNING id, email, display_name, created_at, updated_at"#,
         )
         .bind(user.id().as_uuid())
         .bind(user.email().as_str())
         .bind(user.display_name().as_str())
         .bind(user.updated_at())
+        .bind(expected_updated_at)
         .fetch_optional(&self.pool)
         .await
         .map_err(map_sqlx_error)?

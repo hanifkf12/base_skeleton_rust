@@ -120,6 +120,12 @@ impl From<ApplicationError> for ApiError {
                 message: error.to_string(),
                 www_authenticate: None,
             },
+            ApplicationError::Conflict => Self {
+                status: StatusCode::CONFLICT,
+                code: "conflict",
+                message: error.to_string(),
+                www_authenticate: None,
+            },
             ApplicationError::DependencyUnavailable => Self {
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 code: "service_unavailable",

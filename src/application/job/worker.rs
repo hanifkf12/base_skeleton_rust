@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use tracing::Instrument;
 
-use super::{JobDisposition, JobHandler, JobQueue, JobQueueError};
+use super::{JobDisposition, JobHandler, JobQueue, JobQueueError, JobTracer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunOutcome {
@@ -15,20 +15,25 @@ pub enum RunOutcome {
 pub struct JobWorker {
     queue: Arc<dyn JobQueue>,
     handlers: HashMap<&'static str, Arc<dyn JobHandler>>,
+    tracer: Arc<dyn JobTracer>,
     worker_id: String,
     lease_timeout: Duration,
     retry_base: Duration,
     retry_max: Duration,
+    completed_retention: Duration,
 }
 
 impl JobWorker {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         queue: Arc<dyn JobQueue>,
         handlers: Vec<Arc<dyn JobHandler>>,
+        tracer: Arc<dyn JobTracer>,
         worker_id: String,
         lease_timeout: Duration,
         retry_base: Duration,
         retry_max: Duration,
+        completed_retention: Duration,
     ) -> Self {
         let handlers = handlers
             .into_iter()
@@ -38,10 +43,12 @@ impl JobWorker {
         Self {
             queue,
             handlers,
+            tracer,
             worker_id,
             lease_timeout,
             retry_base,
             retry_max,
+            completed_retention,
         }
     }
 
@@ -63,13 +70,18 @@ impl JobWorker {
                 ))),
             }
         }
-        .instrument(crate::telemetry::job_span(&job))
+        .instrument(self.tracer.span(&job))
         .await;
 
         match result {
             Ok(()) => {
                 self.queue.complete(job.id, &self.worker_id).await?;
                 tracing::info!(job_id = %job.id, job_type = %job.job_type, "job completed");
+                if let Ok(purged) = self.queue.purge_completed(self.completed_retention).await
+                    && purged > 0
+                {
+                    tracing::debug!(purged_jobs = purged, "purged completed jobs");
+                }
                 Ok(RunOutcome::Completed)
             }
             Err(error) => {

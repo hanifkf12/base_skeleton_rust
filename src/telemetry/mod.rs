@@ -21,6 +21,8 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::application::job::ClaimedJob;
+use crate::application::job::JobTracer;
+use crate::application::user::TraceContextProvider;
 
 pub struct TelemetryGuard {
     tracer_provider: Option<SdkTracerProvider>,
@@ -177,5 +179,21 @@ impl Extractor for HeaderCarrier<'_> {
 
     fn keys(&self) -> Vec<&str> {
         self.0.keys().map(axum::http::HeaderName::as_str).collect()
+    }
+}
+
+pub struct OpenTelemetryTraceContext;
+
+impl TraceContextProvider for OpenTelemetryTraceContext {
+    fn current(&self) -> Value {
+        current_trace_context()
+    }
+}
+
+pub struct OpenTelemetryJobTracer;
+
+impl JobTracer for OpenTelemetryJobTracer {
+    fn span(&self, job: &ClaimedJob) -> Span {
+        job_span(job)
     }
 }

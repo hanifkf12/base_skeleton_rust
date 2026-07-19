@@ -19,7 +19,9 @@ impl DeleteUserUseCase {
         if !self.repository.delete(id).await? {
             return Err(ApplicationError::NotFound);
         }
-        let _ = self.cache.delete(id).await;
+        if self.cache.delete(id).await.is_err() {
+            tracing::warn!(user.id = %id, "failed to invalidate cache after user deletion; stale entry will expire via TTL");
+        }
         Ok(())
     }
 }

@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use thiserror::Error;
+use tracing::Span;
 use uuid::Uuid;
 
 use super::{ClaimedJob, JobDisposition, NewJob};
@@ -47,10 +48,16 @@ pub trait JobQueue: Send + Sync {
         error: &str,
         retry_delay: Duration,
     ) -> Result<JobDisposition, JobQueueError>;
+
+    async fn purge_completed(&self, older_than: Duration) -> Result<u64, JobQueueError>;
 }
 
 #[async_trait]
 pub trait JobHandler: Send + Sync {
     fn job_type(&self) -> &'static str;
     async fn handle(&self, job: &ClaimedJob) -> Result<(), JobHandlerError>;
+}
+
+pub trait JobTracer: Send + Sync {
+    fn span(&self, job: &ClaimedJob) -> Span;
 }

@@ -15,13 +15,14 @@ use base_skeleton_rust::{
         job::NewJob,
         user::{
             CacheError, CreateUserUseCase, DeleteUserUseCase, GetUserUseCase, ListUsersUseCase,
-            RepositoryError, UpdateUserUseCase, UserCache, UserRegistrationRepository,
-            UserRepository,
+            RepositoryError, TraceContextProvider, UpdateUserUseCase, UserCache,
+            UserRegistrationRepository, UserRepository,
         },
     },
     domain::user::{User, UserId},
     presentation::http::{AppState, build_router},
 };
+use chrono::{DateTime, Utc};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -61,13 +62,20 @@ impl UserRepository for InMemoryUserRepository {
             .collect())
     }
 
-    async fn update(&self, user: &User) -> Result<Option<User>, RepositoryError> {
+    async fn update(
+        &self,
+        user: &User,
+        expected_updated_at: &DateTime<Utc>,
+    ) -> Result<Option<User>, RepositoryError> {
         let mut users = self.users.lock().unwrap();
-        if !users.contains_key(&user.id()) {
-            return Ok(None);
+        match users.get(&user.id()) {
+            Some(existing) if existing.updated_at() == expected_updated_at => {
+                users.insert(user.id(), user.clone());
+                Ok(Some(user.clone()))
+            }
+            Some(_) => Ok(None),
+            None => Ok(None),
         }
-        users.insert(user.id(), user.clone());
-        Ok(Some(user.clone()))
     }
 
     async fn delete(&self, id: UserId) -> Result<bool, RepositoryError> {
@@ -105,6 +113,14 @@ struct AlwaysReady;
 impl ReadinessCheck for AlwaysReady {
     async fn is_ready(&self) -> bool {
         true
+    }
+}
+
+struct NoOpTraceContext;
+
+impl TraceContextProvider for NoOpTraceContext {
+    fn current(&self) -> Value {
+        json!({})
     }
 }
 
@@ -154,10 +170,12 @@ fn app_with_verifier(verifier: Arc<dyn AccessTokenVerifier>) -> axum::Router {
     let registration_repository: Arc<dyn UserRegistrationRepository> = in_memory_repository.clone();
     let repository: Arc<dyn UserRepository> = in_memory_repository;
     let cache: Arc<dyn UserCache> = Arc::new(NoOpCache);
+    let trace_context: Arc<dyn TraceContextProvider> = Arc::new(NoOpTraceContext);
     let state = AppState {
         create_user: Arc::new(CreateUserUseCase::new(
             registration_repository,
             cache.clone(),
+            trace_context,
             60,
             5,
         )),

@@ -16,6 +16,7 @@ use crate::{
         database::postgres::{PostgresReadinessCheck, PostgresUserRepository},
     },
     presentation::http::AppState,
+    telemetry::OpenTelemetryTraceContext,
 };
 
 pub struct Dependencies {
@@ -35,12 +36,14 @@ pub async fn build_dependencies(config: &Config) -> Result<Dependencies> {
     let registration_repository: Arc<dyn UserRegistrationRepository> = postgres_repository.clone();
     let repository: Arc<dyn UserRepository> = postgres_repository;
     let cache = build_cache(config).await?;
+    let trace_context = Arc::new(OpenTelemetryTraceContext);
     let ttl = config.user_cache_ttl_seconds;
 
     let state = AppState {
         create_user: Arc::new(CreateUserUseCase::new(
             registration_repository,
             cache.clone(),
+            trace_context,
             ttl,
             config.job_max_attempts,
         )),

@@ -6,11 +6,12 @@ use std::{
 
 use async_trait::async_trait;
 use serde_json::json;
+use tracing::Span;
 use uuid::Uuid;
 
 use super::{
-    ClaimedJob, JobDisposition, JobHandler, JobHandlerError, JobQueue, JobQueueError, JobWorker,
-    NewJob, RunOutcome,
+    ClaimedJob, JobDisposition, JobHandler, JobHandlerError, JobQueue, JobQueueError, JobTracer,
+    JobWorker, NewJob, RunOutcome,
 };
 
 #[derive(Default)]
@@ -57,6 +58,10 @@ impl JobQueue for FakeQueue {
         self.failed.lock().unwrap().push((job_id, retry_delay));
         Ok(JobDisposition::RetryScheduled)
     }
+
+    async fn purge_completed(&self, _older_than: Duration) -> Result<u64, JobQueueError> {
+        Ok(0)
+    }
 }
 
 struct SuccessfulHandler;
@@ -83,6 +88,14 @@ fn claimed_job(job_type: &str, attempts: u32) -> ClaimedJob {
     }
 }
 
+struct NoOpJobTracer;
+
+impl JobTracer for NoOpJobTracer {
+    fn span(&self, _job: &ClaimedJob) -> Span {
+        Span::none()
+    }
+}
+
 #[tokio::test]
 async fn completes_a_job_with_a_registered_handler() {
     let queue = Arc::new(FakeQueue::default());
@@ -91,10 +104,12 @@ async fn completes_a_job_with_a_registered_handler() {
     let worker = JobWorker::new(
         queue.clone(),
         vec![Arc::new(SuccessfulHandler)],
+        Arc::new(NoOpJobTracer),
         "worker-1".to_owned(),
         Duration::from_secs(30),
         Duration::from_secs(5),
         Duration::from_secs(60),
+        Duration::from_secs(86_400),
     );
 
     assert_eq!(worker.run_once().await.unwrap(), RunOutcome::Completed);
@@ -109,10 +124,12 @@ async fn retries_an_unknown_job_with_exponential_backoff() {
     let worker = JobWorker::new(
         queue.clone(),
         Vec::new(),
+        Arc::new(NoOpJobTracer),
         "worker-1".to_owned(),
         Duration::from_secs(30),
         Duration::from_secs(5),
         Duration::from_secs(60),
+        Duration::from_secs(86_400),
     );
 
     assert_eq!(worker.run_once().await.unwrap(), RunOutcome::RetryScheduled);

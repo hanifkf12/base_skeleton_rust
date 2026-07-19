@@ -196,6 +196,24 @@ impl JobQueue for PostgresJobQueue {
             }
         }
     }
+
+    async fn purge_completed(&self, older_than: Duration) -> Result<u64, JobQueueError> {
+        let retention_seconds = duration_seconds(older_than);
+        let result = sqlx::query(
+            r#"DELETE FROM background_jobs
+               WHERE id IN (
+                   SELECT id FROM background_jobs
+                   WHERE status = 'completed'
+                     AND completed_at < NOW() - ($1 * INTERVAL '1 second')
+                   LIMIT 1000
+               )"#,
+        )
+        .bind(retention_seconds)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(result.rows_affected())
+    }
 }
 
 fn max_attempts(value: u32) -> Result<i32, JobQueueError> {

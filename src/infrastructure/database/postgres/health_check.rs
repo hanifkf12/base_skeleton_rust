@@ -17,15 +17,21 @@ impl PostgresReadinessCheck {
 impl ReadinessCheck for PostgresReadinessCheck {
     #[tracing::instrument(name = "infrastructure.postgres.readiness", skip(self), fields(db.system = "postgresql"))]
     async fn is_ready(&self) -> bool {
-        match sqlx::query_scalar::<_, i32>("SELECT 1")
-            .fetch_one(&self.pool)
-            .await
-        {
-            Ok(1) => true,
-            Ok(value) => {
-                tracing::error!(
-                    value,
-                    "PostgreSQL readiness query returned an unexpected value"
+        let result = sqlx::query_scalar::<_, i64>(
+            r#"SELECT COUNT(*)
+               FROM information_schema.tables
+               WHERE table_schema = 'public'
+                 AND table_name IN ('users', 'background_jobs')"#,
+        )
+        .fetch_one(&self.pool)
+        .await;
+
+        match result {
+            Ok(2) => true,
+            Ok(count) => {
+                tracing::warn!(
+                    tables_found = count,
+                    "PostgreSQL readiness check: expected 2 required tables, found {count}"
                 );
                 false
             }
