@@ -8,7 +8,7 @@ use axum::{
 };
 
 use crate::{
-    application::user::ListUsersInput,
+    application::{auth::AuthenticatedPrincipal, user::ListUsersInput},
     domain::user::UserId,
     presentation::http::{AppState, error::ApiError},
 };
@@ -18,9 +18,13 @@ use super::{
     response::{UserEnvelope, UserListEnvelope, UserResponse},
 };
 
-#[tracing::instrument(name = "presentation.http.user.create", skip(state, request))]
+#[tracing::instrument(
+    name = "presentation.http.user.create",
+    skip(state, request, _principal)
+)]
 pub async fn create_user(
     State(state): State<AppState>,
+    _principal: AuthenticatedPrincipal,
     request: Result<Json<CreateUserRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<UserEnvelope>), ApiError> {
     let Json(request) = request.map_err(ApiError::from)?;
@@ -31,19 +35,21 @@ pub async fn create_user(
     ))
 }
 
-#[tracing::instrument(name = "presentation.http.user.get", skip(state), fields(user.id = %id))]
+#[tracing::instrument(name = "presentation.http.user.get", skip(state, _principal), fields(user.id = %id))]
 pub async fn get_user(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    _principal: AuthenticatedPrincipal,
 ) -> Result<Json<UserEnvelope>, ApiError> {
     let user = state.get_user.execute(parse_id(&id)?).await?;
     Ok(Json(UserEnvelope { data: user.into() }))
 }
 
-#[tracing::instrument(name = "presentation.http.user.list", skip(state, query))]
+#[tracing::instrument(name = "presentation.http.user.list", skip(state, query, _principal))]
 pub async fn list_users(
     State(state): State<AppState>,
     query: Result<Query<ListUsersQuery>, QueryRejection>,
+    _principal: AuthenticatedPrincipal,
 ) -> Result<Json<UserListEnvelope>, ApiError> {
     let Query(query) = query.map_err(ApiError::from)?;
     let input = ListUsersInput::from(query);
@@ -55,10 +61,11 @@ pub async fn list_users(
     }))
 }
 
-#[tracing::instrument(name = "presentation.http.user.update", skip(state, request), fields(user.id = %id))]
+#[tracing::instrument(name = "presentation.http.user.update", skip(state, request, _principal), fields(user.id = %id))]
 pub async fn update_user(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    _principal: AuthenticatedPrincipal,
     request: Result<Json<UpdateUserRequest>, JsonRejection>,
 ) -> Result<Json<UserEnvelope>, ApiError> {
     let Json(request) = request.map_err(ApiError::from)?;
@@ -69,10 +76,11 @@ pub async fn update_user(
     Ok(Json(UserEnvelope { data: user.into() }))
 }
 
-#[tracing::instrument(name = "presentation.http.user.delete", skip(state), fields(user.id = %id))]
+#[tracing::instrument(name = "presentation.http.user.delete", skip(state, _principal), fields(user.id = %id))]
 pub async fn delete_user(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    _principal: AuthenticatedPrincipal,
 ) -> Result<StatusCode, ApiError> {
     state.delete_user.execute(parse_id(&id)?).await?;
     Ok(StatusCode::NO_CONTENT)

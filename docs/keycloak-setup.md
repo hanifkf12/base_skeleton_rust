@@ -40,7 +40,7 @@ Issuer:    http://localhost:8081/realms/demo
 Discovery: http://localhost:8081/realms/demo/.well-known/openid-configuration
 ```
 
-The service requires `OIDC_ISSUER_URL` to exactly match the discovery document's `issuer` value. Do not mix `localhost` and `127.0.0.1`.
+The service requires `OIDC_ISSUER_URL` to match the discovery document's `issuer` value; a trailing slash in the configured value is tolerated. Do not mix `localhost` and `127.0.0.1`.
 
 ## 3. Create scopes and authorize a user
 
@@ -101,6 +101,7 @@ cp .env.example .env
 OIDC_ISSUER_URL=http://localhost:8081/realms/demo
 OIDC_AUDIENCE=base-skeleton-api
 OIDC_ALLOWED_ALGORITHMS=RS256
+OIDC_ALLOW_INSECURE_HTTP=true
 ```
 
 Then start the service:

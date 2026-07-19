@@ -8,6 +8,7 @@ use serde::Serialize;
 
 use crate::application::user::ApplicationError;
 
+#[derive(Debug)]
 pub struct ApiError {
     status: StatusCode,
     code: &'static str,

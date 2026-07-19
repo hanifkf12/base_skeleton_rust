@@ -103,13 +103,17 @@ Health endpoints are public. Every users endpoint requires a Bearer JWT access t
 
 This service validates externally issued JWT access tokens; it does not store passwords, redirect browsers, issue tokens, or refresh tokens. Configure:
 
-- `OIDC_ISSUER_URL` (required for `http` and `all`): exact expected issuer and discovery base URL.
+- `OIDC_ISSUER_URL` (required for `http` and `all`): exact expected issuer and discovery base URL. Use HTTPS in production.
 - `OIDC_AUDIENCE` (required for `http` and `all`): dedicated API audience.
 - `OIDC_ALLOWED_ALGORITHMS` (optional, default `RS256`): comma-delimited asymmetric signing algorithms.
+- `OIDC_ALLOW_INSECURE_HTTP` (optional, default `false`): allows HTTP issuer and JWKS URLs for local development only.
+- `OIDC_HTTP_TIMEOUT_SECONDS` (optional, default `5`): discovery and JWKS request timeout.
+- `OIDC_CLOCK_SKEW_SECONDS` (optional, default `30`): allowed token timestamp skew.
+- `OIDC_JWKS_REFRESH_INTERVAL_SECONDS` (optional, default `60`): minimum interval between unknown-key JWKS refreshes.
 
 For a complete local Keycloak and Postman walkthrough, see [Keycloak Setup Guide](docs/keycloak-setup.md).
 
-At HTTP startup, the service loads discovery metadata and the initial JWKS. Startup fails if either is unavailable or invalid. Signing keys are cached; an unknown `kid` triggers at most one refresh per 60 seconds. Existing cached keys keep working during a provider outage. Provider calls use a fixed five-second timeout and token time checks allow 30 seconds of clock skew.
+At HTTP startup, the service loads discovery metadata and the initial JWKS. Startup fails if either is unavailable or invalid. Unless insecure HTTP is explicitly allowed, the configured issuer, discovered issuer, and JWKS URI must use HTTPS. Signing keys are cached; an unknown `kid` triggers at most one refresh per configured interval. Existing cached keys keep working during a provider outage.
 
 Tokens must have a signature from a discovered signing key, an allowed algorithm, matching `iss` and `aud`, valid `exp` and optional `nbf` timestamps, a non-empty `sub`, and a standard space-delimited `scope` claim. Authentication failures use the existing JSON error envelope plus a `WWW-Authenticate: Bearer` challenge.
 
@@ -196,7 +200,7 @@ curl -i --request POST http://localhost:3000/api/v1/users \
 
 ### Protecting future API routes
 
-Keep authorization at the HTTP boundary. Add a new route to the read or write router in `src/presentation/http/router.rs`, then attach the appropriate `ScopeRequirement` middleware. Use `users:read` for safe read routes and `users:write` for state-changing routes. Add an HTTP test for missing credentials, allowed scope, and insufficient scope. Do not authorize by trusting client-supplied user IDs or by parsing JWTs inside handlers; the middleware supplies a verified `AuthenticatedPrincipal` in request extensions.
+Keep authorization at the HTTP boundary. Add a new route to the read or write router in `src/presentation/http/router.rs`, then attach the appropriate `ScopeRequirement` middleware. Use `users:read` for safe read routes and `users:write` for state-changing routes. Add an HTTP test for missing credentials, allowed scope, and insufficient scope. Do not authorize by trusting client-supplied user IDs or by parsing JWTs inside handlers; protected handlers can extract the verified `AuthenticatedPrincipal` from the request.
 
 Create and update bodies use this shape:
 

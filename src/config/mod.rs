@@ -26,6 +26,10 @@ pub struct OidcConfig {
     pub issuer_url: String,
     pub audience: String,
     pub allowed_algorithms: Vec<String>,
+    pub http_timeout_seconds: u64,
+    pub clock_skew_seconds: u64,
+    pub jwks_refresh_interval_seconds: u64,
+    pub allow_insecure_http: bool,
 }
 
 impl Config {
@@ -133,10 +137,32 @@ impl OidcConfig {
             "OIDC_ALLOWED_ALGORITHMS must contain at least one algorithm"
         );
 
+        let http_timeout_seconds = parse_or("OIDC_HTTP_TIMEOUT_SECONDS", 5)?;
+        let clock_skew_seconds = parse_or("OIDC_CLOCK_SKEW_SECONDS", 30)?;
+        let jwks_refresh_interval_seconds = parse_or("OIDC_JWKS_REFRESH_INTERVAL_SECONDS", 60)?;
+        let allow_insecure_http = parse_or("OIDC_ALLOW_INSECURE_HTTP", false)?;
+
+        ensure!(
+            http_timeout_seconds > 0,
+            "OIDC_HTTP_TIMEOUT_SECONDS must be greater than zero"
+        );
+        ensure!(
+            clock_skew_seconds > 0,
+            "OIDC_CLOCK_SKEW_SECONDS must be greater than zero"
+        );
+        ensure!(
+            jwks_refresh_interval_seconds > 0,
+            "OIDC_JWKS_REFRESH_INTERVAL_SECONDS must be greater than zero"
+        );
+
         Ok(Self {
             issuer_url,
             audience,
             allowed_algorithms,
+            http_timeout_seconds,
+            clock_skew_seconds,
+            jwks_refresh_interval_seconds,
+            allow_insecure_http,
         })
     }
 }

@@ -21,10 +21,6 @@ use crate::{
     config::OidcConfig,
 };
 
-pub const OIDC_HTTP_TIMEOUT: Duration = Duration::from_secs(5);
-pub const OIDC_CLOCK_SKEW_SECONDS: u64 = 30;
-pub const OIDC_JWKS_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
-
 #[derive(Deserialize)]
 struct DiscoveryMetadata {
     issuer: String,
@@ -47,6 +43,7 @@ pub struct OidcAccessTokenVerifier {
     keys: RwLock<JwkSet>,
     refresh: Mutex<RefreshState>,
     refresh_interval: Duration,
+    clock_skew_seconds: u64,
 }
 
 #[derive(Default)]
@@ -57,26 +54,39 @@ struct RefreshState {
 impl OidcAccessTokenVerifier {
     pub async fn discover(config: &OidcConfig) -> Result<Arc<Self>> {
         let client = reqwest::Client::builder()
-            .timeout(OIDC_HTTP_TIMEOUT)
+            .timeout(Duration::from_secs(config.http_timeout_seconds))
             .build()
             .context("could not construct OIDC HTTP client")?;
         let allowed_algorithms = parse_algorithms(&config.allowed_algorithms)?;
-        let discovery_url = format!(
-            "{}/.well-known/openid-configuration",
-            config.issuer_url.trim_end_matches('/')
-        );
+        validate_issuer_url(
+            &config.issuer_url,
+            config.allow_insecure_http,
+            "OIDC_ISSUER_URL",
+        )?;
+        let configured_issuer = config.issuer_url.trim_end_matches('/');
+        let discovery_url = format!("{configured_issuer}/.well-known/openid-configuration");
         let metadata: DiscoveryMetadata = fetch_json(&client, &discovery_url)
             .await
             .context("could not load OIDC discovery metadata")?;
 
+        validate_issuer_url(
+            &metadata.issuer,
+            config.allow_insecure_http,
+            "OIDC discovery issuer",
+        )?;
         ensure!(
-            metadata.issuer == config.issuer_url,
+            metadata.issuer.trim_end_matches('/') == configured_issuer,
             "OIDC discovery issuer does not match OIDC_ISSUER_URL"
         );
         ensure!(
             !metadata.jwks_uri.trim().is_empty(),
             "OIDC discovery metadata contains an empty jwks_uri"
         );
+        validate_url_scheme(
+            &metadata.jwks_uri,
+            config.allow_insecure_http,
+            "OIDC jwks_uri",
+        )?;
 
         let keys: JwkSet = fetch_json(&client, &metadata.jwks_uri)
             .await
@@ -85,13 +95,14 @@ impl OidcAccessTokenVerifier {
 
         Ok(Arc::new(Self {
             client,
-            issuer: config.issuer_url.clone(),
+            issuer: metadata.issuer,
             audience: config.audience.clone(),
             allowed_algorithms,
             jwks_uri: metadata.jwks_uri,
             keys: RwLock::new(keys),
             refresh: Mutex::new(RefreshState::default()),
-            refresh_interval: OIDC_JWKS_REFRESH_INTERVAL,
+            refresh_interval: Duration::from_secs(config.jwks_refresh_interval_seconds),
+            clock_skew_seconds: config.clock_skew_seconds,
         }))
     }
 
@@ -161,7 +172,7 @@ impl AccessTokenVerifier for OidcAccessTokenVerifier {
             DecodingKey::from_jwk(&jwk).map_err(|_| AccessTokenVerificationError::InvalidToken)?;
 
         let mut validation = Validation::new(header.alg);
-        validation.leeway = OIDC_CLOCK_SKEW_SECONDS;
+        validation.leeway = self.clock_skew_seconds;
         validation.validate_nbf = true;
         validation.set_audience(&[&self.audience]);
         validation.set_issuer(&[&self.issuer]);
@@ -194,6 +205,30 @@ where
         .error_for_status()?
         .json()
         .await
+}
+
+fn validate_issuer_url(value: &str, allow_insecure_http: bool, field: &str) -> Result<()> {
+    let url = parse_url(value, field)?;
+    ensure!(
+        url.query().is_none() && url.fragment().is_none(),
+        "{field} must not contain a query or fragment"
+    );
+    validate_url_scheme(value, allow_insecure_http, field)
+}
+
+fn validate_url_scheme(value: &str, allow_insecure_http: bool, field: &str) -> Result<()> {
+    let url = parse_url(value, field)?;
+    let allowed = url.scheme() == "https" || (allow_insecure_http && url.scheme() == "http");
+    ensure!(
+        allowed,
+        "{field} must use https{}",
+        if allow_insecure_http { " or http" } else { "" }
+    );
+    Ok(())
+}
+
+fn parse_url(value: &str, field: &str) -> Result<reqwest::Url> {
+    reqwest::Url::parse(value).with_context(|| format!("{field} must be a valid URL"))
 }
 
 fn parse_algorithms(values: &[String]) -> Result<Vec<Algorithm>> {
@@ -333,6 +368,10 @@ mod tests {
                     issuer_url: issuer,
                     audience: "users-api".to_owned(),
                     allowed_algorithms: vec!["RS256".to_owned()],
+                    http_timeout_seconds: 5,
+                    clock_skew_seconds: 30,
+                    jwks_refresh_interval_seconds: 60,
+                    allow_insecure_http: true,
                 },
                 state,
                 task,
@@ -506,6 +545,26 @@ mod tests {
             verifier.verify(&sign("rotated", &claims)).await,
             Err(AccessTokenVerificationError::AuthenticationUnavailable)
         );
+        verifier.verify(&sign("initial", &claims)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejects_http_issuer_when_insecure_http_is_disabled() {
+        let provider = TestProvider::start("initial").await;
+        let mut config = provider.config.clone();
+        config.allow_insecure_http = false;
+
+        assert!(OidcAccessTokenVerifier::discover(&config).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn accepts_configured_issuer_with_trailing_slash() {
+        let provider = TestProvider::start("initial").await;
+        let mut config = provider.config.clone();
+        config.issuer_url = format!("{}/", config.issuer_url);
+        let verifier = OidcAccessTokenVerifier::discover(&config).await.unwrap();
+        let claims = valid_claims(&provider.config.issuer_url);
+
         verifier.verify(&sign("initial", &claims)).await.unwrap();
     }
 

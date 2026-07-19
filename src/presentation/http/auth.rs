@@ -1,13 +1,15 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Request, State},
-    http::header,
+    extract::{FromRequestParts, Request, State},
+    http::{header, request::Parts},
     middleware::Next,
     response::Response,
 };
 
-use crate::application::auth::{AccessTokenVerificationError, AccessTokenVerifier};
+use crate::application::auth::{
+    AccessTokenVerificationError, AccessTokenVerifier, AuthenticatedPrincipal,
+};
 
 use super::error::ApiError;
 
@@ -20,6 +22,21 @@ pub struct ScopeRequirement {
 impl ScopeRequirement {
     pub fn new(verifier: Arc<dyn AccessTokenVerifier>, scope: &'static str) -> Self {
         Self { verifier, scope }
+    }
+}
+
+impl<S> FromRequestParts<S> for AuthenticatedPrincipal
+where
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .get::<AuthenticatedPrincipal>()
+            .cloned()
+            .ok_or_else(ApiError::unauthorized)
     }
 }
 
@@ -67,7 +84,9 @@ fn bearer_token(request: &Request) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use axum::body::Body;
+    use std::collections::HashSet;
+
+    use axum::{body::Body, http::StatusCode, response::IntoResponse};
 
     use super::*;
 
@@ -86,5 +105,33 @@ mod tests {
                 .unwrap();
             assert_eq!(bearer_token(&request), None);
         }
+    }
+
+    #[tokio::test]
+    async fn principal_extractor_reads_verified_principal_from_extensions() {
+        let principal = AuthenticatedPrincipal::new(
+            "operator-123".to_owned(),
+            HashSet::from(["users:read".to_owned()]),
+        );
+        let mut request = Request::builder().body(Body::empty()).unwrap();
+        request.extensions_mut().insert(principal.clone());
+        let (mut parts, _) = request.into_parts();
+
+        let extracted = AuthenticatedPrincipal::from_request_parts(&mut parts, &())
+            .await
+            .unwrap();
+        assert_eq!(extracted, principal);
+    }
+
+    #[tokio::test]
+    async fn principal_extractor_rejects_missing_principal() {
+        let request = Request::builder().body(Body::empty()).unwrap();
+        let (mut parts, _) = request.into_parts();
+
+        let error = AuthenticatedPrincipal::from_request_parts(&mut parts, &())
+            .await
+            .unwrap_err();
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }

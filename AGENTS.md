@@ -38,4 +38,4 @@ Use concise Conventional Commit-style messages, such as `feat: add PostgreSQL ba
 
 ## Configuration & Operations
 
-Start from `.env.example`; do not commit real credentials. `DATABASE_URL` configures the service and worker; `MIGRATION_DATABASE_URL` may override it for migrations. Set `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_SERVICE_NAME` to export logs and traces to SigNoz.
+Start from `.env.example`; do not commit real credentials. `DATABASE_URL` configures the service and worker; `MIGRATION_DATABASE_URL` may override it for migrations. HTTP and `all` also require `OIDC_ISSUER_URL` and `OIDC_AUDIENCE`; `OIDC_ALLOWED_ALGORITHMS`, `OIDC_ALLOW_INSECURE_HTTP`, `OIDC_HTTP_TIMEOUT_SECONDS`, `OIDC_CLOCK_SKEW_SECONDS`, and `OIDC_JWKS_REFRESH_INTERVAL_SECONDS` tune token verification. Keep `OIDC_ALLOW_INSECURE_HTTP=false` outside local development. Set `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_SERVICE_NAME` to export logs and traces to SigNoz.
