@@ -38,6 +38,8 @@ The HTTP server is an OIDC resource server. Before starting `http` or `all`, set
 
 ## Commands
 
+The repository includes a `Makefile` for common workflows. Run `make help` to list targets; for example, `make deps-up`, `make db-migrate`, `make all`, and `make check`. The underlying Cargo and Docker commands remain available directly.
+
 | Command | Purpose |
 | --- | --- |
 | `cargo run -- http` | Start only the REST API |
