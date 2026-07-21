@@ -2,6 +2,8 @@
 
 This project follows Clean Architecture and applies SOLID principles pragmatically. Business rules stay in the center of the application, while Axum, PostgreSQL, Redis, and other external systems remain replaceable implementation details.
 
+This file is the contributor guide: it explains dependency rules and how to add domains, features, migrations, jobs, and events without eroding the architecture. For the current system context, Mermaid diagrams, runtime topology, security boundaries, complete configuration reference, failure matrix, and scaling model, read [Complete System Architecture](docs/system-architecture.md). For commands and local operation, read [README](README.md).
+
 ## Request Flow
 
 ```text
@@ -91,6 +93,7 @@ Each action is represented by a concrete use-case struct with explicit dependenc
 pub struct CreateUserUseCase {
     repository: Arc<dyn UserRegistrationRepository>,
     cache: Arc<dyn UserCache>,
+    trace_context: Arc<dyn TraceContextProvider>,
     cache_ttl_seconds: u64,
     job_max_attempts: u32,
 }
@@ -108,7 +111,7 @@ pub trait UserCache {
 }
 
 pub trait JobQueue {
-    // Enqueue, claim, complete, and fail durable background jobs.
+    // Enqueue, claim, complete, fail, and clean up durable background jobs.
 }
 ```
 
@@ -127,6 +130,8 @@ UserRepository → PostgresUserRepository
 UserCache      → RedisUserCache / NoOpUserCache
 JobQueue       → PostgresJobQueue
 JobHandler     → UserCreatedHandler
+AccessTokenVerifier → OidcAccessTokenVerifier
+ReadinessCheck → PostgresReadinessCheck
 ```
 
 Infrastructure is responsible for:
@@ -150,6 +155,10 @@ Presentation owns HTTP-specific concerns:
 - JSON serialization.
 - HTTP status codes.
 - HTTP error mapping.
+- Bearer-token extraction and route scope enforcement.
+- Per-IP rate limiting and trusted-proxy handling.
+- Public liveness/readiness routes and the conditional metrics route.
+- Request IDs, timeouts, body limits, tracing, and HTTP metrics middleware.
 
 A handler should only:
 
@@ -176,6 +185,7 @@ Bootstrap is the composition root. It is responsible for:
 - Selecting the runtime mode from the unified CLI.
 - Loading and validating configuration required by that mode.
 - Creating the PostgreSQL connection pool.
+- Splitting the configured connection budget between HTTP and worker in `all` mode.
 - Running migrations only for explicit database commands.
 - Creating the Redis connection manager when Redis is configured and reachable.
 - Falling back to `NoOpUserCache` when the optional cache is unavailable.
@@ -184,6 +194,7 @@ Bootstrap is the composition root. It is responsible for:
 - Creating Axum application state.
 - Building and starting the HTTP server.
 - Building and starting the standalone job worker.
+- Registering concrete job handlers and periodic cleanup policy.
 - Handling graceful shutdown.
 
 The executable exposes these operational modes:
@@ -211,9 +222,60 @@ RedisUserCache ─────────┘
 PostgresJobQueue ──→ JobWorker ──→ UserCreatedHandler
 ```
 
-PostgreSQL is a required dependency and powers `/health/ready`. Redis is deliberately excluded from readiness because it is an optional optimization rather than a source of truth. `/health/live` only reports that the process is running.
+PostgreSQL is a required dependency and powers `/health/ready`. Readiness requires the applied `_sqlx_migrations` versions, success flags, and checksums to exactly match the migrations embedded in the running binary; missing, extra, failed, or modified migrations are not ready. Redis is deliberately excluded because it is an optional optimization rather than a source of truth. `/health/live` only reports that the process is running.
 
 No service locator or global mutable dependency container is used.
+
+## Current Cross-Cutting Architecture
+
+Cross-cutting controls remain at the outer boundaries. Do not move authentication, transport rate limits, SQL migration checks, or telemetry exporters into domain or application code.
+
+### HTTP boundary
+
+The router is assembled in `src/presentation/http/router.rs` with three route groups:
+
+- `/api/*`: OIDC scope middleware and a per-IP token bucket.
+- `/health`, `/health/live`, `/health/ready`: public operational probes, excluded from API rate limiting.
+- `/metrics`: mounted only when `METRICS_PROMETHEUS_BEARER_TOKEN` is configured, excluded from API rate limiting, and protected by constant-time Bearer-token comparison.
+
+Global layers mark authorization and cookie headers sensitive, assign and propagate `x-request-id`, create the root HTTP trace span, enforce `REQUEST_TIMEOUT_SECONDS`, limit bodies with `MAX_REQUEST_BODY_BYTES`, and record HTTP count, duration, and active-request metrics. Metric route labels must be fixed templates; never add an IP, subject, UUID, raw path, email, or other high-cardinality value.
+
+When adding an HTTP endpoint:
+
+1. Put it in the read or write router with an explicit scope.
+2. Keep it under `/api/*` unless it is genuinely an operational endpoint.
+3. Add a normalized route template to `normalized_route`.
+4. Preserve the standard JSON error envelope.
+5. Add HTTP tests for credentials, scope, input, success, and mapped failure.
+
+### OIDC verification
+
+`OidcAccessTokenVerifier` is an infrastructure adapter for the application-owned `AccessTokenVerifier` port. HTTP startup fetches discovery metadata and an initial JWKS. It validates exact issuer equality, HTTPS unless explicitly relaxed for local development, asymmetric algorithms, signing-key purpose/operations, and compatible key type.
+
+Token verification requires `iss`, `aud`, `exp`, `iat`, and non-empty `sub`; validates optional `nbf`; rejects a future `iat` outside clock skew; and rejects `exp - iat` above `OIDC_MAX_TOKEN_LIFETIME_SECONDS`.
+
+JWKS caching uses two different controls:
+
+- `OIDC_JWKS_MAX_AGE_SECONDS` is the maximum age at which cached key material remains usable.
+- `OIDC_JWKS_REFRESH_INTERVAL_SECONDS` throttles refresh and retry attempts.
+
+An unknown `kid` or stale cache may trigger refresh. Refresh is single-flight inside a process. Once cached keys are stale, refresh failure must return `authentication_unavailable`; do not fall back to stale keys indefinitely.
+
+### Client IP and rate limiting
+
+The direct TCP peer is the client key by default. `X-Forwarded-For` is considered only when the immediate peer belongs to `TRUSTED_PROXY_CIDRS`. A malformed forwarded chain falls back to the peer. Operators must configure only actual proxy networks and must make those proxies overwrite untrusted forwarding headers.
+
+The token bucket is configured by `RATE_LIMIT_REQUESTS_PER_MINUTE` and `RATE_LIMIT_BURST`. Exhaustion returns JSON `429` with `Retry-After` and increments a rejection metric. The limiter is process-local; horizontally scaled replicas do not share buckets. Use an edge limiter or shared adapter if a globally strict quota becomes a requirement.
+
+### Telemetry
+
+`src/telemetry/mod.rs` owns OpenTelemetry providers and instruments. Structured JSON logs always go to stdout. When `OTEL_EXPORTER_OTLP_ENDPOINT` is configured, traces, logs, and metrics export over OTLP/HTTP. W3C context crosses HTTP and is stored with durable jobs so the worker can create a consumer child span.
+
+The supported application metrics are HTTP count/duration/active requests, rate-limit rejections, job outcomes/duration, cleanup deletions, and worker errors. Prometheus and OTLP readers share the same meter provider. Instrument attributes must stay bounded and operational; sensitive or high-cardinality values belong in neither metrics nor logs.
+
+### Deployment boundary
+
+The same multi-stage Docker image runs `db migrate`, `http`, or `worker`. It builds with `--locked`, uses Debian slim with CA certificates, runs as a non-root user, and health-checks `/health/live`. Production should run migrations as a separate one-shot step, then deploy independently scalable HTTP and worker processes. `all` is primarily for local or simple deployments and rejects `DATABASE_MAX_CONNECTIONS < 2`.
 
 ## Adding a Feature to an Existing Domain
 
@@ -539,7 +601,7 @@ Bootstrap is the only layer allowed to know that `OrderRepository` is implemente
 
 ## Database Migration Guide
 
-SQLx migrations live in `migrations/` and are embedded into the binary by `sqlx::migrate!()` in `src/bootstrap/database.rs`. Runtime commands never change the schema. Apply migrations explicitly with the unified application CLI before starting HTTP or workers.
+SQLx migrations live in `migrations/` and are embedded once by the shared `MIGRATOR` in `src/infrastructure/database/postgres/migrations.rs`. Migration commands and HTTP readiness use this same binary migration set. Runtime commands never change the schema. Apply migrations explicitly with the unified application CLI before starting HTTP or workers.
 
 ### Install the SQLx CLI
 
@@ -663,6 +725,8 @@ cargo run -- db info
 ```
 
 SQLx records applied migrations and checksums in the `_sqlx_migrations` table.
+
+HTTP readiness compares that table with every up migration embedded in the binary. The check requires identical version sets, successful application, and matching checksums. A pending, extra, failed, or edited migration makes `/health/ready` return `503`; table existence alone is not sufficient.
 
 ### Apply migrations manually
 
@@ -791,6 +855,9 @@ src/application/job/
 src/infrastructure/database/postgres/job_queue.rs
     PostgreSQL enqueue, claim, completion, failure, and lease recovery
 
+src/infrastructure/database/postgres/migrations.rs
+    Shared embedded migrator and exact readiness comparison
+
 src/infrastructure/job/
     Concrete job handlers
 
@@ -808,7 +875,7 @@ The worker is an inbound adapter like HTTP presentation: it receives work from a
 
 ### Distributed tracing and logs
 
-`src/telemetry/mod.rs` configures JSON logs on stdout plus OTLP trace and log export. Set `OTEL_EXPORTER_OTLP_ENDPOINT` to enable the exporter and `OTEL_SERVICE_NAME` to name the service in SigNoz. The standard generic endpoint automatically resolves to `/v1/traces` and `/v1/logs`. For SigNoz Cloud, set `OTEL_EXPORTER_OTLP_HEADERS` to `signoz-ingestion-key=<key>`.
+`src/telemetry/mod.rs` configures JSON logs on stdout plus OTLP trace, log, and metric export. Set `OTEL_EXPORTER_OTLP_ENDPOINT` to enable the exporters and `OTEL_SERVICE_NAME` to name the service in SigNoz. The standard generic endpoint resolves to the signal-specific OTLP/HTTP paths. For SigNoz Cloud, set `OTEL_EXPORTER_OTLP_HEADERS` to `signoz-ingestion-key=<key>`.
 
 HTTP spans extract W3C `traceparent` and `tracestate` headers. When a use case creates a durable job, it saves the current W3C context in `background_jobs.trace_context`. `JobWorker` extracts that context and makes the handler execution a consumer span, preserving the parent trace across the database boundary. Keep job payloads, credentials, cookies, and request bodies out of span fields and logs.
 
@@ -840,6 +907,8 @@ pub async fn execute(&self, order_id: OrderId, input: CreateOrderInput) -> Resul
 For a new HTTP endpoint, add the presentation span on the handler, then add its child application span and spans on each concrete infrastructure adapter it calls. The `TraceLayer` root span automatically keeps them under the same request and records the final `http.response.status_code`. For a background job, `JobWorker` already creates `job.process`; handler and adapter spans will become its children.
 
 The application outputs JSON logs to stdout and bridges every enabled `tracing` event to OTLP logs. The bridge attaches the active HTTP/job trace and span context, so SigNoz correlates logs with OTLP traces directly. HTTP 5xx responses set the root span status to `ERROR`; mapped 4xx responses emit a warning log with safe status and error-code fields. Use `RUST_LOG=base_skeleton_rust=info,tower_http=info` for production and temporarily raise a component to `debug` while investigating an issue.
+
+Metrics use normalized route templates and bounded outcome/operation labels. Set `METRICS_PROMETHEUS_BEARER_TOKEN` to install a Prometheus reader and mount `GET /metrics`; without it the route does not exist. The token is compared in constant time and must never be logged. When adding an instrument, first prove that every attribute has bounded cardinality.
 
 ### Job lifecycle
 
@@ -937,6 +1006,9 @@ When `JOB_WORKER_ID` is omitted, the process generates a UUID-based ID.
 | `JOB_RETRY_MAX_SECONDS` | `300` | Maximum exponential retry delay |
 | `JOB_MAX_ATTEMPTS` | `5` | Attempt limit assigned to newly created jobs |
 | `JOB_WORKER_ID` | generated | Unique owner recorded while a job is running |
+| `JOB_COMPLETED_RETENTION_SECONDS` | `86400` | Age after which completed jobs become cleanup candidates |
+| `JOB_DEAD_RETENTION_SECONDS` | `2592000` | Age after which dead jobs become cleanup candidates |
+| `JOB_CLEANUP_INTERVAL_SECONDS` | `3600` | Interval between periodic maintenance passes |
 
 Set the lease timeout longer than the normal maximum handler duration. The current implementation uses a fixed lease and does not send heartbeats during a long handler. If jobs legitimately run longer than the lease, split them into shorter jobs or add a lease-renewal operation before lowering the timeout.
 
@@ -1077,7 +1149,7 @@ Add monitoring for:
 - Handler duration relative to lease timeout.
 - PostgreSQL connection-pool saturation.
 
-Completed jobs remain available for auditing. Add a bounded cleanup task when volume requires it, for example deleting completed rows older than a documented retention period in small batches. Do not delete pending, running, or dead jobs as routine cleanup.
+The worker runs maintenance immediately at startup and every `JOB_CLEANUP_INTERVAL_SECONDS`, independent of whether any job succeeds. One pass deletes at most 1,000 terminal rows: completed jobs older than `JOB_COMPLETED_RETENTION_SECONDS` and dead jobs older than `JOB_DEAD_RETENTION_SECONDS`. Pending and running jobs are never retention-cleaned. Dead-job deletion is permanent, so export or archive records before retention expires when audit policy requires it.
 
 ### When to move beyond PostgreSQL
 

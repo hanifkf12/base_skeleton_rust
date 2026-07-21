@@ -2,6 +2,8 @@
 
 A working user CRUD API organized around Clean Architecture boundaries. PostgreSQL is the source of truth and also provides a durable background-job queue. Redis is an optional, best-effort cache for single-user reads.
 
+For the full system-level view—including Mermaid diagrams, runtime flows, security boundaries, data consistency, failure modes, deployment topology, and extension guidance—see [Complete System Architecture](docs/system-architecture.md).
+
 ## Run locally
 
 ```bash
