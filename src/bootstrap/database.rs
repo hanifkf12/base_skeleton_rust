@@ -1,11 +1,13 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result, bail};
-use sqlx::{FromRow, migrate::Migrator, postgres::PgPoolOptions};
+use sqlx::{FromRow, postgres::PgPoolOptions};
 
-use crate::{cli::DatabaseCommand, config::Config};
-
-static MIGRATOR: Migrator = sqlx::migrate!();
+use crate::{
+    cli::DatabaseCommand,
+    config::Config,
+    infrastructure::database::postgres::migrations::{MIGRATOR, migration_table_exists},
+};
 
 #[derive(FromRow)]
 struct AppliedMigrationRow {
@@ -139,11 +141,4 @@ async fn connect() -> Result<sqlx::PgPool> {
         .connect(&database_url)
         .await
         .context("could not connect migration command to PostgreSQL")
-}
-
-async fn migration_table_exists(pool: &sqlx::PgPool) -> Result<bool> {
-    sqlx::query_scalar("SELECT to_regclass(current_schema() || '._sqlx_migrations') IS NOT NULL")
-        .fetch_one(pool)
-        .await
-        .context("could not inspect the PostgreSQL migration table")
 }

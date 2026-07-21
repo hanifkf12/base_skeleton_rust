@@ -3,6 +3,8 @@ name: CI
 on:
   push:
   pull_request:
+  schedule:
+    - cron: "17 3 * * 1"
 
 permissions:
   contents: read
@@ -38,3 +40,11 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Run tests
         run: cargo test --all-targets --all-features
+      - name: Build release binary
+        run: cargo build --release --locked
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+      - name: Audit dependencies
+        run: cargo audit
+      - name: Build production image
+        run: docker build --tag base-skeleton-rust:ci .

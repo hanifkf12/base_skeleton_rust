@@ -28,6 +28,7 @@ pub async fn run(config: Config, mut shutdown_receiver: watch::Receiver<bool>) -
         .job_worker_id
         .unwrap_or_else(|| format!("worker-{}", Uuid::new_v4()));
     let poll_interval = Duration::from_millis(config.job_poll_interval_milliseconds);
+    let cleanup_interval = Duration::from_secs(config.job_cleanup_interval_seconds);
     let worker = JobWorker::new(
         queue,
         handlers,
@@ -37,7 +38,9 @@ pub async fn run(config: Config, mut shutdown_receiver: watch::Receiver<bool>) -
         Duration::from_secs(config.job_retry_base_seconds),
         Duration::from_secs(config.job_retry_max_seconds),
         Duration::from_secs(config.job_completed_retention_seconds),
+        Duration::from_secs(config.job_dead_retention_seconds),
     );
+    let mut next_cleanup = tokio::time::Instant::now();
 
     tracing::info!(%worker_id, "PostgreSQL job worker started");
 
@@ -46,12 +49,28 @@ pub async fn run(config: Config, mut shutdown_receiver: watch::Receiver<bool>) -
             break;
         }
 
+        if tokio::time::Instant::now() >= next_cleanup {
+            match worker.run_maintenance().await {
+                Ok(purged) if purged > 0 => {
+                    crate::telemetry::record_cleanup_count(purged);
+                    tracing::info!(purged_jobs = purged, "purged terminal jobs");
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    crate::telemetry::record_worker_error("cleanup");
+                    tracing::error!(%error, "job cleanup failed");
+                }
+            }
+            next_cleanup = tokio::time::Instant::now() + cleanup_interval;
+        }
+
         // Finish an active job before observing shutdown. Handlers still need
         // idempotency because at-least-once delivery permits crash recovery.
         let should_pause = match worker.run_once().await {
             Ok(RunOutcome::Idle) => true,
             Ok(_) => false,
             Err(error) => {
+                crate::telemetry::record_worker_error("iteration");
                 tracing::error!(%error, "job worker iteration failed");
                 true
             }

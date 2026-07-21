@@ -11,10 +11,12 @@ axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 dotenvy = "0.15"
-opentelemetry = { version = "0.31", features = ["logs", "trace"] }
+opentelemetry = { version = "0.31", features = ["logs", "metrics", "trace"] }
 opentelemetry-appender-tracing = { version = "0.31", features = ["experimental_use_tracing_span_context"] }
-opentelemetry-otlp = { version = "0.31", default-features = false, features = ["http-proto", "logs", "reqwest-client", "tls-roots", "trace"] }
-opentelemetry_sdk = { version = "0.31", features = ["experimental_logs_batch_log_processor_with_async_runtime", "experimental_trace_batch_span_processor_with_async_runtime", "logs", "rt-tokio", "trace"] }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = ["http-proto", "logs", "metrics", "reqwest-client", "tls-roots", "trace"] }
+opentelemetry-prometheus-text-exporter = "0.2"
+opentelemetry_sdk = { version = "0.31", features = ["experimental_logs_batch_log_processor_with_async_runtime", "experimental_metrics_periodicreader_with_async_runtime", "experimental_trace_batch_span_processor_with_async_runtime", "logs", "metrics", "rt-tokio", "trace"] }
+ipnet = "2"
 redis = { version = "0.32", features = ["connection-manager", "tokio-comp"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
@@ -24,11 +26,13 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-r
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
 tower = { version = "0.5", features = ["util"] }
+tower_governor = { version = "0.8", default-features = false, features = ["axum"] }
 tower-http = { version = "0.6", features = ["request-id", "sensitive-headers", "timeout", "trace"] }
 tracing = "0.1"
 tracing-opentelemetry = "0.32"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+subtle = "2"
 
 [dev-dependencies]
 http-body-util = "0.1"

@@ -22,6 +22,16 @@ cargo run -- worker
 
 Runtime commands do not change the database schema. Run `db migrate` as a deployment step before starting HTTP or workers. The API listens on `http://localhost:3000` by default. Redis is not required for jobs; omit `REDIS_URL` if you do not want the optional user cache.
 
+Build one production image and use it for both the privileged migration step and the unprivileged runtime:
+
+```bash
+docker build -t base-skeleton-rust .
+docker run --rm --env-file .env base-skeleton-rust db migrate
+docker run --rm --env-file .env -p 3000:3000 base-skeleton-rust http
+```
+
+The Debian slim runtime includes CA certificates, runs as a non-root user, defaults to `http`, and health-checks `/health/live`. Override the command with `worker`, `all`, or `db migrate`.
+
 The HTTP server is an OIDC resource server. Before starting `http` or `all`, set `OIDC_ISSUER_URL` to an issuer with discovery/JWKS support and set `OIDC_AUDIENCE` to this API's dedicated audience. These variables are intentionally not read by `worker` or `db` commands.
 
 ## Commands
@@ -52,6 +62,7 @@ The queue provides:
 - Worker leases and recovery of jobs abandoned by a crashed worker.
 - Ownership checks before a worker can complete or fail a claimed job.
 - A handler registry keyed by `job_type`.
+- Periodic cleanup independent of job success. Completed and dead retention are separately configurable; each pass deletes at most 1,000 rows.
 
 The included `user.created` handler validates the payload and logs it to demonstrate the full path. Replace or extend that handler with a real idempotent side effect.
 
@@ -91,6 +102,7 @@ Keep each worker ID unique. `JOB_LEASE_TIMEOUT_SECONDS` must be longer than the 
 | `GET` | `/health` | Liveness probe |
 | `GET` | `/health/live` | Explicit liveness probe |
 | `GET` | `/health/ready` | PostgreSQL readiness probe |
+| `GET` | `/metrics` | Bearer-protected Prometheus metrics; absent unless configured |
 | `POST` | `/api/v1/users` | Create a user |
 | `GET` | `/api/v1/users?page=1&per_page=20` | List users |
 | `GET` | `/api/v1/users/{id}` | Get a user |
@@ -98,6 +110,10 @@ Keep each worker ID unique. `JOB_LEASE_TIMEOUT_SECONDS` must be longer than the 
 | `DELETE` | `/api/v1/users/{id}` | Delete a user |
 
 Health endpoints are public. Every users endpoint requires a Bearer JWT access token issued by `OIDC_ISSUER_URL` for `OIDC_AUDIENCE`: `GET` and `HEAD` require `users:read`, while `POST`, `PUT`, and `DELETE` require `users:write`.
+
+All `/api/*` routes also use a per-client-IP token bucket, defaulting to 120 requests/minute with burst 30. Health and metrics are excluded. Rejections use the normal JSON error envelope, status `429`, and `Retry-After`.
+
+The TCP peer is authoritative by default. `X-Forwarded-For` is considered only when the immediate peer belongs to `TRUSTED_PROXY_CIDRS`; malformed headers fall back to the peer. Configure only proxy networks you operate, and ensure the proxy overwrites client-supplied forwarding headers.
 
 ## OIDC access tokens
 
@@ -110,12 +126,14 @@ This service validates externally issued JWT access tokens; it does not store pa
 - `OIDC_HTTP_TIMEOUT_SECONDS` (optional, default `5`): discovery and JWKS request timeout.
 - `OIDC_CLOCK_SKEW_SECONDS` (optional, default `30`): allowed token timestamp skew.
 - `OIDC_JWKS_REFRESH_INTERVAL_SECONDS` (optional, default `60`): minimum interval between unknown-key JWKS refreshes.
+- `OIDC_JWKS_MAX_AGE_SECONDS` (optional, default `300`): maximum key-cache age before refresh is mandatory.
+- `OIDC_MAX_TOKEN_LIFETIME_SECONDS` (optional, default `3600`): maximum interval between required `iat` and `exp` claims.
 
 For a complete local Keycloak and Postman walkthrough, see [Keycloak Setup Guide](docs/keycloak-setup.md).
 
-At HTTP startup, the service loads discovery metadata and the initial JWKS. Startup fails if either is unavailable or invalid. Unless insecure HTTP is explicitly allowed, the configured issuer, discovered issuer, and JWKS URI must use HTTPS. Signing keys are cached; an unknown `kid` triggers at most one refresh per configured interval. Existing cached keys keep working during a provider outage.
+At HTTP startup, the service loads discovery metadata and the initial JWKS. Startup fails if either is unavailable or invalid. Unless insecure HTTP is explicitly allowed, the configured issuer, discovered issuer, and JWKS URI must use HTTPS. Signing keys are cached; an unknown `kid` triggers at most one refresh per configured interval. Once the cache reaches `OIDC_JWKS_MAX_AGE_SECONDS`, refresh is mandatory even for an unchanged `kid`; a failure returns `503 authentication_unavailable` and stale key material is not used. The refresh interval throttles retries to protect the provider.
 
-Tokens must have a signature from a discovered signing key, an allowed algorithm, matching `iss` and `aud`, valid `exp` and optional `nbf` timestamps, a non-empty `sub`, and a standard space-delimited `scope` claim. Authentication failures use the existing JSON error envelope plus a `WWW-Authenticate: Bearer` challenge.
+Tokens must have a signature from a discovered signing key, an allowed algorithm, matching `iss` and `aud`, valid `exp`, required `iat`, and optional `nbf` timestamps, a non-empty `sub`, and a standard space-delimited `scope` claim. Future `iat` outside clock skew and excessive token lifetime are rejected. Authentication failures use the existing JSON error envelope plus a `WWW-Authenticate: Bearer` challenge.
 
 ### Set up authorization
 
@@ -196,7 +214,7 @@ curl -i --request POST http://localhost:3000/api/v1/users \
 | --- | --- | --- |
 | `401 unauthorized` | Missing, malformed, expired, or invalid token | Obtain a new access token and check issuer, audience, signing algorithm, and clock. |
 | `403 insufficient_scope` | Valid token lacks the endpoint's scope | Assign `users:read` or `users:write` in the provider, then obtain a new token. |
-| `503 authentication_unavailable` | An unknown signing key required a JWKS refresh while the provider was unavailable | Restore provider connectivity and retry; tokens using already cached keys continue to work. |
+| `503 authentication_unavailable` | An unknown key or stale JWKS required refresh while the provider was unavailable | Restore provider connectivity and retry; only keys still within the configured cache age remain usable. |
 
 ### Protecting future API routes
 
@@ -239,6 +257,10 @@ OTEL_EXPORTER_OTLP_HEADERS=signoz-ingestion-key=your-ingestion-key
 ```
 
 The service accepts W3C `traceparent` and `tracestate` headers, exports traces to `/v1/traces` and logs to `/v1/logs`, and stores the resulting trace context with every durable job. The worker restores that context before handling the job, so an HTTP request and its asynchronous work appear in one distributed trace. Job payloads, authorization headers, cookies, and request bodies are never added to spans or logs.
+
+Metrics share the OpenTelemetry meter provider and export through OTLP `/v1/metrics` whenever the OTLP endpoint is set. They cover HTTP count/duration/active requests, rate-limit rejections, job outcome/duration, cleanup deletions, and worker errors. Labels use normalized route templates and bounded outcomes—never IPs, subjects, UUIDs, or raw paths.
+
+Set `METRICS_PROMETHEUS_BEARER_TOKEN` from secret management to mount `GET /metrics`, and configure the scraper with the same Bearer credential. Without it the route does not exist. Comparison is constant-time and the token is never logged.
 
 For self-hosted deployments, OTLP/HTTP is normally exposed on port `4318`; use the regional ingest endpoint supplied by SigNoz Cloud for cloud deployments. See the [SigNoz Rust instrumentation guide](https://signoz.io/docs/instrumentation/opentelemetry-rust/) and [self-hosted ingestion overview](https://signoz.io/docs/ingestion/self-hosted/overview/).
 
@@ -297,6 +319,8 @@ cargo test
 ```
 
 Set `TEST_DATABASE_URL` to include the real PostgreSQL queue lifecycle test locally. Without it, that one test returns early; all dependency-free tests still run. CI provisions PostgreSQL and always executes the database path.
+
+CI treats a missing `TEST_DATABASE_URL` as an error, performs locked release and Docker builds, and runs `cargo audit`. A weekly schedule catches advisories published after dependencies were last changed.
 
 ```bash
 TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/base_skeleton \

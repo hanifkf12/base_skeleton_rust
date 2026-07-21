@@ -49,7 +49,11 @@ pub trait JobQueue: Send + Sync {
         retry_delay: Duration,
     ) -> Result<JobDisposition, JobQueueError>;
 
-    async fn purge_completed(&self, older_than: Duration) -> Result<u64, JobQueueError>;
+    async fn purge_terminal(
+        &self,
+        completed_older_than: Duration,
+        dead_older_than: Duration,
+    ) -> Result<u64, JobQueueError>;
 }
 
 #[async_trait]

@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use tracing::Instrument;
 
@@ -21,6 +25,7 @@ pub struct JobWorker {
     retry_base: Duration,
     retry_max: Duration,
     completed_retention: Duration,
+    dead_retention: Duration,
 }
 
 impl JobWorker {
@@ -34,6 +39,7 @@ impl JobWorker {
         retry_base: Duration,
         retry_max: Duration,
         completed_retention: Duration,
+        dead_retention: Duration,
     ) -> Self {
         let handlers = handlers
             .into_iter()
@@ -49,6 +55,7 @@ impl JobWorker {
             retry_base,
             retry_max,
             completed_retention,
+            dead_retention,
         }
     }
 
@@ -60,6 +67,7 @@ impl JobWorker {
         else {
             return Ok(RunOutcome::Idle);
         };
+        let started = Instant::now();
 
         let result = async {
             match self.handlers.get(job.job_type.as_str()) {
@@ -76,12 +84,8 @@ impl JobWorker {
         match result {
             Ok(()) => {
                 self.queue.complete(job.id, &self.worker_id).await?;
+                crate::telemetry::record_job_outcome(&job.job_type, "completed", started.elapsed());
                 tracing::info!(job_id = %job.id, job_type = %job.job_type, "job completed");
-                if let Ok(purged) = self.queue.purge_completed(self.completed_retention).await
-                    && purged > 0
-                {
-                    tracing::debug!(purged_jobs = purged, "purged completed jobs");
-                }
                 Ok(RunOutcome::Completed)
             }
             Err(error) => {
@@ -101,12 +105,28 @@ impl JobWorker {
                     "job failed"
                 );
 
-                Ok(match disposition {
+                let outcome = match disposition {
                     JobDisposition::RetryScheduled => RunOutcome::RetryScheduled,
                     JobDisposition::DeadLettered => RunOutcome::DeadLettered,
-                })
+                };
+                crate::telemetry::record_job_outcome(
+                    &job.job_type,
+                    match outcome {
+                        RunOutcome::RetryScheduled => "retry_scheduled",
+                        RunOutcome::DeadLettered => "dead_lettered",
+                        _ => unreachable!("failure disposition only produces failure outcomes"),
+                    },
+                    started.elapsed(),
+                );
+                Ok(outcome)
             }
         }
+    }
+
+    pub async fn run_maintenance(&self) -> Result<u64, JobQueueError> {
+        self.queue
+            .purge_terminal(self.completed_retention, self.dead_retention)
+            .await
     }
 }
 

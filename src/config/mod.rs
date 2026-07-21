@@ -1,6 +1,7 @@
 use std::{env, net::SocketAddr};
 
 use anyhow::{Context, Result, ensure};
+use ipnet::IpNet;
 
 #[derive(Clone)]
 pub struct Config {
@@ -19,6 +20,12 @@ pub struct Config {
     pub job_max_attempts: u32,
     pub job_worker_id: Option<String>,
     pub job_completed_retention_seconds: u64,
+    pub job_dead_retention_seconds: u64,
+    pub job_cleanup_interval_seconds: u64,
+    pub rate_limit_requests_per_minute: u32,
+    pub rate_limit_burst: u32,
+    pub trusted_proxy_cidrs: Vec<IpNet>,
+    pub metrics_prometheus_bearer_token: Option<String>,
 }
 
 #[derive(Clone)]
@@ -29,6 +36,8 @@ pub struct OidcConfig {
     pub http_timeout_seconds: u64,
     pub clock_skew_seconds: u64,
     pub jwks_refresh_interval_seconds: u64,
+    pub jwks_max_age_seconds: u64,
+    pub max_token_lifetime_seconds: u64,
     pub allow_insecure_http: bool,
 }
 
@@ -50,6 +59,11 @@ impl Config {
         let job_retry_max_seconds = parse_or("JOB_RETRY_MAX_SECONDS", 300)?;
         let job_max_attempts = parse_or("JOB_MAX_ATTEMPTS", 5)?;
         let job_completed_retention_seconds = parse_or("JOB_COMPLETED_RETENTION_SECONDS", 86_400)?;
+        let job_dead_retention_seconds = parse_or("JOB_DEAD_RETENTION_SECONDS", 2_592_000)?;
+        let job_cleanup_interval_seconds = parse_or("JOB_CLEANUP_INTERVAL_SECONDS", 3_600)?;
+        let rate_limit_requests_per_minute = parse_or("RATE_LIMIT_REQUESTS_PER_MINUTE", 120)?;
+        let rate_limit_burst = parse_or("RATE_LIMIT_BURST", 30)?;
+        let trusted_proxy_cidrs = parse_cidrs("TRUSTED_PROXY_CIDRS")?;
 
         ensure!(
             database_max_connections > 0,
@@ -95,6 +109,22 @@ impl Config {
             job_completed_retention_seconds > 0,
             "JOB_COMPLETED_RETENTION_SECONDS must be greater than zero"
         );
+        ensure!(
+            job_dead_retention_seconds > 0,
+            "JOB_DEAD_RETENTION_SECONDS must be greater than zero"
+        );
+        ensure!(
+            job_cleanup_interval_seconds > 0,
+            "JOB_CLEANUP_INTERVAL_SECONDS must be greater than zero"
+        );
+        ensure!(
+            rate_limit_requests_per_minute > 0,
+            "RATE_LIMIT_REQUESTS_PER_MINUTE must be greater than zero"
+        );
+        ensure!(
+            rate_limit_burst > 0,
+            "RATE_LIMIT_BURST must be greater than zero"
+        );
 
         Ok(Self {
             server_address,
@@ -112,6 +142,12 @@ impl Config {
             job_max_attempts,
             job_worker_id: optional("JOB_WORKER_ID")?,
             job_completed_retention_seconds,
+            job_dead_retention_seconds,
+            job_cleanup_interval_seconds,
+            rate_limit_requests_per_minute,
+            rate_limit_burst,
+            trusted_proxy_cidrs,
+            metrics_prometheus_bearer_token: optional("METRICS_PROMETHEUS_BEARER_TOKEN")?,
         })
     }
 
@@ -140,6 +176,8 @@ impl OidcConfig {
         let http_timeout_seconds = parse_or("OIDC_HTTP_TIMEOUT_SECONDS", 5)?;
         let clock_skew_seconds = parse_or("OIDC_CLOCK_SKEW_SECONDS", 30)?;
         let jwks_refresh_interval_seconds = parse_or("OIDC_JWKS_REFRESH_INTERVAL_SECONDS", 60)?;
+        let jwks_max_age_seconds = parse_or("OIDC_JWKS_MAX_AGE_SECONDS", 300)?;
+        let max_token_lifetime_seconds = parse_or("OIDC_MAX_TOKEN_LIFETIME_SECONDS", 3_600)?;
         let allow_insecure_http = parse_or("OIDC_ALLOW_INSECURE_HTTP", false)?;
 
         ensure!(
@@ -154,6 +192,14 @@ impl OidcConfig {
             jwks_refresh_interval_seconds > 0,
             "OIDC_JWKS_REFRESH_INTERVAL_SECONDS must be greater than zero"
         );
+        ensure!(
+            jwks_max_age_seconds > 0,
+            "OIDC_JWKS_MAX_AGE_SECONDS must be greater than zero"
+        );
+        ensure!(
+            max_token_lifetime_seconds > 0,
+            "OIDC_MAX_TOKEN_LIFETIME_SECONDS must be greater than zero"
+        );
 
         Ok(Self {
             issuer_url,
@@ -162,9 +208,27 @@ impl OidcConfig {
             http_timeout_seconds,
             clock_skew_seconds,
             jwks_refresh_interval_seconds,
+            jwks_max_age_seconds,
+            max_token_lifetime_seconds,
             allow_insecure_http,
         })
     }
+}
+
+fn parse_cidrs(name: &str) -> Result<Vec<IpNet>> {
+    let Some(value) = optional(name)? else {
+        return Ok(Vec::new());
+    };
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value
+                .parse::<IpNet>()
+                .with_context(|| format!("{name} contains invalid CIDR {value}"))
+        })
+        .collect()
 }
 
 fn required(name: &str) -> Result<String> {

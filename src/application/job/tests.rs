@@ -59,7 +59,11 @@ impl JobQueue for FakeQueue {
         Ok(JobDisposition::RetryScheduled)
     }
 
-    async fn purge_completed(&self, _older_than: Duration) -> Result<u64, JobQueueError> {
+    async fn purge_terminal(
+        &self,
+        _completed_older_than: Duration,
+        _dead_older_than: Duration,
+    ) -> Result<u64, JobQueueError> {
         Ok(0)
     }
 }
@@ -110,6 +114,7 @@ async fn completes_a_job_with_a_registered_handler() {
         Duration::from_secs(5),
         Duration::from_secs(60),
         Duration::from_secs(86_400),
+        Duration::from_secs(2_592_000),
     );
 
     assert_eq!(worker.run_once().await.unwrap(), RunOutcome::Completed);
@@ -130,6 +135,7 @@ async fn retries_an_unknown_job_with_exponential_backoff() {
         Duration::from_secs(5),
         Duration::from_secs(60),
         Duration::from_secs(86_400),
+        Duration::from_secs(2_592_000),
     );
 
     assert_eq!(worker.run_once().await.unwrap(), RunOutcome::RetryScheduled);

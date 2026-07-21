@@ -2,7 +2,7 @@ use std::{
     collections::HashSet,
     str::FromStr,
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail, ensure};
@@ -30,6 +30,8 @@ struct DiscoveryMetadata {
 #[derive(Deserialize)]
 struct AccessTokenClaims {
     sub: String,
+    exp: u64,
+    iat: u64,
     #[serde(default)]
     scope: String,
 }
@@ -40,10 +42,17 @@ pub struct OidcAccessTokenVerifier {
     audience: String,
     allowed_algorithms: Vec<Algorithm>,
     jwks_uri: String,
-    keys: RwLock<JwkSet>,
+    keys: RwLock<CachedKeys>,
     refresh: Mutex<RefreshState>,
     refresh_interval: Duration,
+    jwks_max_age: Duration,
     clock_skew_seconds: u64,
+    max_token_lifetime_seconds: u64,
+}
+
+struct CachedKeys {
+    set: JwkSet,
+    fetched_at: Instant,
 }
 
 #[derive(Default)]
@@ -99,10 +108,15 @@ impl OidcAccessTokenVerifier {
             audience: config.audience.clone(),
             allowed_algorithms,
             jwks_uri: metadata.jwks_uri,
-            keys: RwLock::new(keys),
+            keys: RwLock::new(CachedKeys {
+                set: keys,
+                fetched_at: Instant::now(),
+            }),
             refresh: Mutex::new(RefreshState::default()),
             refresh_interval: Duration::from_secs(config.jwks_refresh_interval_seconds),
+            jwks_max_age: Duration::from_secs(config.jwks_max_age_seconds),
             clock_skew_seconds: config.clock_skew_seconds,
+            max_token_lifetime_seconds: config.max_token_lifetime_seconds,
         }))
     }
 
@@ -113,7 +127,9 @@ impl OidcAccessTokenVerifier {
     ) -> Result<Jwk, AccessTokenVerificationError> {
         {
             let keys = self.keys.read().await;
-            if let Some(key) = find_key(&keys, kid, algorithm) {
+            if keys.fetched_at.elapsed() < self.jwks_max_age
+                && let Some(key) = find_key(&keys.set, kid, algorithm)
+            {
                 return Ok(key);
             }
         }
@@ -121,15 +137,22 @@ impl OidcAccessTokenVerifier {
         let mut refresh = self.refresh.lock().await;
         {
             let keys = self.keys.read().await;
-            if let Some(key) = find_key(&keys, kid, algorithm) {
+            if keys.fetched_at.elapsed() < self.jwks_max_age
+                && let Some(key) = find_key(&keys.set, kid, algorithm)
+            {
                 return Ok(key);
             }
         }
+        let cache_is_stale = self.keys.read().await.fetched_at.elapsed() >= self.jwks_max_age;
         if refresh
             .last_attempt
             .is_some_and(|last_attempt| last_attempt.elapsed() < self.refresh_interval)
         {
-            return Err(AccessTokenVerificationError::InvalidToken);
+            return Err(if cache_is_stale {
+                AccessTokenVerificationError::AuthenticationUnavailable
+            } else {
+                AccessTokenVerificationError::InvalidToken
+            });
         }
 
         refresh.last_attempt = Some(Instant::now());
@@ -146,7 +169,10 @@ impl OidcAccessTokenVerifier {
         };
 
         let key = find_key(&keys, kid, algorithm);
-        *self.keys.write().await = keys;
+        *self.keys.write().await = CachedKeys {
+            set: keys,
+            fetched_at: Instant::now(),
+        };
         key.ok_or(AccessTokenVerificationError::InvalidToken)
     }
 }
@@ -176,11 +202,21 @@ impl AccessTokenVerifier for OidcAccessTokenVerifier {
         validation.validate_nbf = true;
         validation.set_audience(&[&self.audience]);
         validation.set_issuer(&[&self.issuer]);
-        validation.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
+        validation.set_required_spec_claims(&["exp", "iat", "iss", "aud", "sub"]);
 
         let token = decode::<AccessTokenClaims>(access_token, &decoding_key, &validation)
             .map_err(|_| AccessTokenVerificationError::InvalidToken)?;
         if token.claims.sub.trim().is_empty() {
+            return Err(AccessTokenVerificationError::InvalidToken);
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| AccessTokenVerificationError::AuthenticationUnavailable)?
+            .as_secs();
+        if token.claims.iat > now.saturating_add(self.clock_skew_seconds)
+            || token.claims.exp < token.claims.iat
+            || token.claims.exp - token.claims.iat > self.max_token_lifetime_seconds
+        {
             return Err(AccessTokenVerificationError::InvalidToken);
         }
         let scopes = token
@@ -371,6 +407,8 @@ mod tests {
                     http_timeout_seconds: 5,
                     clock_skew_seconds: 30,
                     jwks_refresh_interval_seconds: 60,
+                    jwks_max_age_seconds: 300,
+                    max_token_lifetime_seconds: 3_600,
                     allow_insecure_http: true,
                 },
                 state,
@@ -419,6 +457,7 @@ mod tests {
             "iss": issuer,
             "aud": "users-api",
             "exp": now + 300,
+            "iat": now,
             "nbf": now - 1
         })
     }
@@ -473,6 +512,15 @@ mod tests {
         let mut malformed_expiration = claims.clone();
         malformed_expiration["exp"] = json!("tomorrow");
         invalid_tokens.push(sign("initial", &malformed_expiration));
+        let mut missing_issued_at = claims.clone();
+        missing_issued_at.as_object_mut().unwrap().remove("iat");
+        invalid_tokens.push(sign("initial", &missing_issued_at));
+        let mut future_issued_at = claims.clone();
+        future_issued_at["iat"] = json!(u64::MAX - 1);
+        invalid_tokens.push(sign("initial", &future_issued_at));
+        let mut excessive_lifetime = claims.clone();
+        excessive_lifetime["exp"] = json!(claims["iat"].as_u64().unwrap() + 3_601);
+        invalid_tokens.push(sign("initial", &excessive_lifetime));
 
         let mut bad_signature = valid_token;
         let signature_offset = bad_signature.rfind('.').unwrap() + 1;
@@ -532,6 +580,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_same_kid_refresh_is_single_flight() {
+        let provider = TestProvider::start("initial").await;
+        let mut config = provider.config.clone();
+        config.jwks_max_age_seconds = 1;
+        let verifier = OidcAccessTokenVerifier::discover(&config).await.unwrap();
+        let token = sign("initial", &valid_claims(&config.issuer_url));
+        tokio::time::sleep(Duration::from_millis(1_050)).await;
+
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..8 {
+            let verifier = verifier.clone();
+            let token = token.clone();
+            tasks.spawn(async move { verifier.verify(&token).await });
+        }
+        while let Some(result) = tasks.join_next().await {
+            assert!(result.unwrap().is_ok());
+        }
+        assert_eq!(provider.state.jwks_requests.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
     async fn reports_unavailable_when_required_runtime_refresh_fails() {
         let provider = TestProvider::start("initial").await;
         let verifier = OidcAccessTokenVerifier::discover(&provider.config)
@@ -546,6 +615,24 @@ mod tests {
             Err(AccessTokenVerificationError::AuthenticationUnavailable)
         );
         verifier.verify(&sign("initial", &claims)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fails_closed_when_cached_jwks_is_stale_and_refresh_fails() {
+        let provider = TestProvider::start("initial").await;
+        let mut config = provider.config.clone();
+        config.jwks_max_age_seconds = 1;
+        config.jwks_refresh_interval_seconds = 60;
+        let verifier = OidcAccessTokenVerifier::discover(&config).await.unwrap();
+        let claims = valid_claims(&config.issuer_url);
+        tokio::time::sleep(Duration::from_millis(1_050)).await;
+        provider.task.abort();
+        let _ = provider.task.await;
+
+        assert_eq!(
+            verifier.verify(&sign("initial", &claims)).await,
+            Err(AccessTokenVerificationError::AuthenticationUnavailable)
+        );
     }
 
     #[tokio::test]

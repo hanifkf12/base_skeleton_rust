@@ -1,0 +1,11 @@
+.git
+.github
+.env
+.env.*
+!.env.example
+target
+Dockerfile*
+README.md
+tests
+docs
+compose.yaml

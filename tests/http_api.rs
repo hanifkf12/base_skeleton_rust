@@ -20,7 +20,7 @@ use base_skeleton_rust::{
         },
     },
     domain::user::{User, UserId},
-    presentation::http::{AppState, build_router},
+    presentation::http::{AppState, RouterConfig, build_router},
 };
 use chrono::{DateTime, Utc};
 use http_body_util::BodyExt;
@@ -166,6 +166,15 @@ impl AccessTokenVerifier for FakeAccessTokenVerifier {
 }
 
 fn app_with_verifier(verifier: Arc<dyn AccessTokenVerifier>) -> axum::Router {
+    app_with_config(verifier, 120, 30, None)
+}
+
+fn app_with_config(
+    verifier: Arc<dyn AccessTokenVerifier>,
+    requests_per_minute: u32,
+    burst: u32,
+    metrics_token: Option<String>,
+) -> axum::Router {
     let in_memory_repository = Arc::new(InMemoryUserRepository::default());
     let registration_repository: Arc<dyn UserRegistrationRepository> = in_memory_repository.clone();
     let repository: Arc<dyn UserRepository> = in_memory_repository;
@@ -189,7 +198,19 @@ fn app_with_verifier(verifier: Arc<dyn AccessTokenVerifier>) -> axum::Router {
         delete_user: Arc::new(DeleteUserUseCase::new(repository, cache)),
     };
 
-    build_router(state, Arc::new(AlwaysReady), verifier, 10, 65_536)
+    build_router(
+        state,
+        Arc::new(AlwaysReady),
+        verifier,
+        RouterConfig {
+            request_timeout_seconds: 10,
+            max_request_body_bytes: 65_536,
+            rate_limit_requests_per_minute: requests_per_minute,
+            rate_limit_burst: burst,
+            trusted_proxy_cidrs: Vec::new(),
+            metrics_prometheus_bearer_token: metrics_token,
+        },
+    )
 }
 
 #[tokio::test]
@@ -255,6 +276,110 @@ async fn exposes_liveness_and_readiness() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
     }
+}
+
+#[tokio::test]
+async fn rate_limits_only_api_routes_with_retry_after_and_json_error() {
+    let verifier = Arc::new(FakeAccessTokenVerifier::with_scopes(&["users:read"]));
+    let app = app_with_config(verifier, 1, 2, None);
+    for _ in 0..10 {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/health/live")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    for _ in 0..2 {
+        let response = app
+            .clone()
+            .oneshot(authorized_request("GET", "/api/v1/users", Body::empty()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    let response = app
+        .oneshot(authorized_request("GET", "/api/v1/users", Body::empty()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(response.headers().contains_key(header::RETRY_AFTER));
+    assert_eq!(
+        response_json(response).await["error"]["code"],
+        "rate_limit_exceeded"
+    );
+}
+
+#[tokio::test]
+async fn rate_limit_bucket_refills() {
+    let verifier = Arc::new(FakeAccessTokenVerifier::with_scopes(&["users:read"]));
+    let app = app_with_config(verifier, 600, 1, None);
+    let first = app
+        .clone()
+        .oneshot(authorized_request("GET", "/api/v1/users", Body::empty()))
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let limited = app
+        .clone()
+        .oneshot(authorized_request("GET", "/api/v1/users", Body::empty()))
+        .await
+        .unwrap();
+    assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    let refilled = app
+        .oneshot(authorized_request("GET", "/api/v1/users", Body::empty()))
+        .await
+        .unwrap();
+    assert_eq!(refilled.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn metrics_route_is_disabled_or_requires_its_bearer_token() {
+    let disabled = app();
+    let response = disabled
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let verifier = Arc::new(FakeAccessTokenVerifier::with_scopes(&[]));
+    let enabled = app_with_config(verifier, 120, 30, Some("scrape-secret".to_owned()));
+    for authorization in [None, Some("Bearer wrong-secret")] {
+        let mut request = Request::builder().uri("/metrics");
+        if let Some(value) = authorization {
+            request = request.header(header::AUTHORIZATION, value);
+        }
+        let response = enabled
+            .clone()
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    let response = enabled
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .header(header::AUTHORIZATION, "Bearer scrape-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // The binary installs the exporter before building the router. This
+    // integration router deliberately does not initialize global telemetry.
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
 #[tokio::test]

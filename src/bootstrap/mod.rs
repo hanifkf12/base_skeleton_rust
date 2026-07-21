@@ -4,7 +4,7 @@ mod http;
 mod shutdown;
 mod worker;
 
-use anyhow::Result;
+use anyhow::{Result, ensure};
 
 use crate::{
     cli::{Command, DatabaseCommand},
@@ -40,20 +40,21 @@ async fn run_worker() -> Result<()> {
 }
 
 async fn run_all(run_migrations: bool) -> Result<()> {
+    let config = Config::from_env()?;
+    let (http_connections, worker_connections) =
+        split_all_mode_connections(config.database_max_connections)?;
     if run_migrations {
         database::run(DatabaseCommand::Migrate).await?;
     }
 
-    let config = Config::from_env()?;
     let oidc_config = OidcConfig::from_env()?;
     let (sender, receiver) = shutdown::channel();
     let signal_task = tokio::spawn(shutdown::notify_on_signal(sender.clone()));
 
-    let half_connections = (config.database_max_connections / 2).max(1);
     let mut http_config = config.clone();
-    http_config.database_max_connections = half_connections;
+    http_config.database_max_connections = http_connections;
     let mut worker_config = config.clone();
-    worker_config.database_max_connections = config.database_max_connections - half_connections;
+    worker_config.database_max_connections = worker_connections;
 
     let http = http::run(http_config, oidc_config, receiver.clone());
     let worker = worker::run(worker_config, receiver);
@@ -74,4 +75,26 @@ async fn run_all(run_migrations: bool) -> Result<()> {
 
     signal_task.abort();
     result
+}
+
+fn split_all_mode_connections(total: u32) -> Result<(u32, u32)> {
+    ensure!(
+        total >= 2,
+        "all mode requires DATABASE_MAX_CONNECTIONS to be at least 2 so HTTP and worker each receive a connection"
+    );
+    let http = total / 2;
+    Ok((http, total - http))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_all_mode_connections;
+
+    #[test]
+    fn all_mode_requires_and_splits_connections() {
+        assert!(split_all_mode_connections(1).is_err());
+        assert_eq!(split_all_mode_connections(2).unwrap(), (1, 1));
+        assert_eq!(split_all_mode_connections(5).unwrap(), (2, 3));
+        assert_eq!(split_all_mode_connections(6).unwrap(), (3, 3));
+    }
 }

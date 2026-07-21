@@ -7,7 +7,7 @@ use crate::{
     application::auth::AccessTokenVerifier,
     config::{Config, OidcConfig},
     infrastructure::oidc::OidcAccessTokenVerifier,
-    presentation::http::build_router,
+    presentation::http::{RouterConfig, build_router},
 };
 
 use super::{dependencies::build_dependencies, shutdown};
@@ -24,20 +24,29 @@ pub async fn run(
         dependencies.state,
         dependencies.readiness,
         access_token_verifier,
-        config.request_timeout_seconds,
-        config.max_request_body_bytes,
+        RouterConfig {
+            request_timeout_seconds: config.request_timeout_seconds,
+            max_request_body_bytes: config.max_request_body_bytes,
+            rate_limit_requests_per_minute: config.rate_limit_requests_per_minute,
+            rate_limit_burst: config.rate_limit_burst,
+            trusted_proxy_cidrs: config.trusted_proxy_cidrs,
+            metrics_prometheus_bearer_token: config.metrics_prometheus_bearer_token,
+        },
     );
     let listener = TcpListener::bind(config.server_address)
         .await
         .with_context(|| format!("could not bind server to {}", config.server_address))?;
 
     tracing::info!(address = %config.server_address, "HTTP server started");
-    axum::serve(listener, router)
-        .with_graceful_shutdown(async move {
-            shutdown::wait(&mut shutdown_receiver).await;
-        })
-        .await
-        .context("HTTP server failed")?;
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        shutdown::wait(&mut shutdown_receiver).await;
+    })
+    .await
+    .context("HTTP server failed")?;
     tracing::info!("HTTP server stopped");
     Ok(())
 }

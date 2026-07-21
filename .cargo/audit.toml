@@ -1,0 +1,6 @@
+[advisories]
+# sqlx-macros locks sqlx-mysql and rsa even though this PostgreSQL-only build
+# does not enable or compile the MySQL adapter (`cargo tree -i rsa` is empty).
+# RUSTSEC-2023-0071 has no fixed release; keep the weekly audit so this narrow
+# exception can be removed as soon as SQLx stops locking the unused adapter.
+ignore = ["RUSTSEC-2023-0071"]
