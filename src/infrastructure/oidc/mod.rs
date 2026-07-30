@@ -21,6 +21,18 @@ use crate::{
     config::OidcConfig,
 };
 
+impl From<jsonwebtoken::errors::Error> for AccessTokenVerificationError {
+    fn from(_: jsonwebtoken::errors::Error) -> Self {
+        AccessTokenVerificationError::InvalidToken
+    }
+}
+
+impl From<reqwest::Error> for AccessTokenVerificationError {
+    fn from(_: reqwest::Error) -> Self {
+        AccessTokenVerificationError::AuthenticationUnavailable
+    }
+}
+
 #[derive(Deserialize)]
 struct DiscoveryMetadata {
     issuer: String,
@@ -184,7 +196,7 @@ impl AccessTokenVerifier for OidcAccessTokenVerifier {
         access_token: &str,
     ) -> Result<AuthenticatedPrincipal, AccessTokenVerificationError> {
         let header =
-            decode_header(access_token).map_err(|_| AccessTokenVerificationError::InvalidToken)?;
+            decode_header(access_token).map_err(AccessTokenVerificationError::from)?;
         if !self.allowed_algorithms.contains(&header.alg) {
             return Err(AccessTokenVerificationError::InvalidToken);
         }
@@ -195,7 +207,7 @@ impl AccessTokenVerifier for OidcAccessTokenVerifier {
             .ok_or(AccessTokenVerificationError::InvalidToken)?;
         let jwk = self.key_for(kid, header.alg).await?;
         let decoding_key =
-            DecodingKey::from_jwk(&jwk).map_err(|_| AccessTokenVerificationError::InvalidToken)?;
+            DecodingKey::from_jwk(&jwk).map_err(AccessTokenVerificationError::from)?;
 
         let mut validation = Validation::new(header.alg);
         validation.leeway = self.clock_skew_seconds;
@@ -205,7 +217,7 @@ impl AccessTokenVerifier for OidcAccessTokenVerifier {
         validation.set_required_spec_claims(&["exp", "iat", "iss", "aud", "sub"]);
 
         let token = decode::<AccessTokenClaims>(access_token, &decoding_key, &validation)
-            .map_err(|_| AccessTokenVerificationError::InvalidToken)?;
+            .map_err(AccessTokenVerificationError::from)?;
         if token.claims.sub.trim().is_empty() {
             return Err(AccessTokenVerificationError::InvalidToken);
         }

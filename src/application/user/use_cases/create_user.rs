@@ -51,7 +51,9 @@ impl CreateUserUseCase {
         )
         .with_trace_context(self.trace_context.current());
         let created = self.repository.create_with_job(&user, &job).await?;
-        let _ = self.cache.set(&created, self.cache_ttl_seconds).await;
+        if let Err(e) = self.cache.set(&created, self.cache_ttl_seconds).await {
+            tracing::warn!(error = %e, user.id = %created.id(), "failed to write newly created user to cache");
+        }
         Ok(created)
     }
 }

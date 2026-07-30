@@ -48,12 +48,12 @@ impl UpdateUserUseCase {
                 return Err(ApplicationError::NotFound);
             }
         };
-        if self
+        if let Err(e) = self
             .cache
             .set(&updated, self.cache_ttl_seconds)
             .await
-            .is_err()
         {
+            tracing::warn!(error = %e, user.id = %updated.id(), "failed to write updated user to cache – attempting invalidate");
             let _ = self.cache.delete(updated.id()).await;
         }
         Ok(updated)

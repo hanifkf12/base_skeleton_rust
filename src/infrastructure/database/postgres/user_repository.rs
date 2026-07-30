@@ -65,8 +65,7 @@ impl UserRepository for PostgresUserRepository {
         .bind(user.created_at())
         .bind(user.updated_at())
         .fetch_one(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?
+        .await?
         .into_domain()
     }
 
@@ -77,8 +76,7 @@ impl UserRepository for PostgresUserRepository {
         )
         .bind(id.as_uuid())
         .fetch_optional(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?
+        .await?
         .map(UserRow::into_domain)
         .transpose()
     }
@@ -92,8 +90,7 @@ impl UserRepository for PostgresUserRepository {
         .bind(i64::from(limit))
         .bind(i64::try_from(offset).unwrap_or(i64::MAX))
         .fetch_all(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?;
+        .await?;
 
         rows.into_iter().map(UserRow::into_domain).collect()
     }
@@ -115,8 +112,7 @@ impl UserRepository for PostgresUserRepository {
         .bind(user.updated_at())
         .bind(expected_updated_at)
         .fetch_optional(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?
+        .await?
         .map(UserRow::into_domain)
         .transpose()
     }
@@ -126,8 +122,7 @@ impl UserRepository for PostgresUserRepository {
         let result = sqlx::query("DELETE FROM users WHERE id = $1")
             .bind(id.as_uuid())
             .execute(&self.pool)
-            .await
-            .map_err(map_sqlx_error)?;
+            .await?;
         Ok(result.rows_affected() == 1)
     }
 }
@@ -145,7 +140,7 @@ impl UserRegistrationRepository for PostgresUserRepository {
             return Err(RepositoryError::Unavailable);
         }
 
-        let mut transaction = self.pool.begin().await.map_err(map_sqlx_error)?;
+        let mut transaction = self.pool.begin().await?;
 
         let created = sqlx::query_as::<_, UserRow>(
             r#"INSERT INTO users (id, email, display_name, created_at, updated_at)
@@ -158,8 +153,7 @@ impl UserRegistrationRepository for PostgresUserRepository {
         .bind(user.created_at())
         .bind(user.updated_at())
         .fetch_one(&mut *transaction)
-        .await
-        .map_err(map_sqlx_error)?;
+        .await?;
 
         sqlx::query(
             r#"INSERT INTO background_jobs (id, job_type, payload, trace_context, max_attempts)
@@ -171,22 +165,23 @@ impl UserRegistrationRepository for PostgresUserRepository {
         .bind(&job.trace_context)
         .bind(max_attempts)
         .execute(&mut *transaction)
-        .await
-        .map_err(map_sqlx_error)?;
+        .await?;
 
-        transaction.commit().await.map_err(map_sqlx_error)?;
+        transaction.commit().await?;
         created.into_domain()
     }
 }
 
-fn map_sqlx_error(error: sqlx::Error) -> RepositoryError {
-    if let sqlx::Error::Database(database_error) = &error
-        && database_error.is_unique_violation()
-        && database_error.constraint() == Some("users_email_unique")
-    {
-        return RepositoryError::DuplicateEmail;
-    }
+impl From<sqlx::Error> for RepositoryError {
+    fn from(error: sqlx::Error) -> Self {
+        if let sqlx::Error::Database(database_error) = &error
+            && database_error.is_unique_violation()
+            && database_error.constraint() == Some("users_email_unique")
+        {
+            return RepositoryError::DuplicateEmail;
+        }
 
-    tracing::error!(error = ?error, "PostgreSQL user operation failed");
-    RepositoryError::Unavailable
+        tracing::error!(error = ?error, "PostgreSQL user operation failed");
+        RepositoryError::Unavailable
+    }
 }

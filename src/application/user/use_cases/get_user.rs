@@ -34,7 +34,9 @@ impl GetUserUseCase {
             .find_by_id(id)
             .await?
             .ok_or(ApplicationError::NotFound)?;
-        let _ = self.cache.set(&user, self.cache_ttl_seconds).await;
+        if let Err(e) = self.cache.set(&user, self.cache_ttl_seconds).await {
+            tracing::warn!(error = %e, user.id = %user.id(), "failed to warm cache after repository hit");
+        }
         Ok(user)
     }
 }

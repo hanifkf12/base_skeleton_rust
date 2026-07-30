@@ -68,8 +68,7 @@ impl JobQueue for PostgresJobQueue {
         .bind(&job.trace_context)
         .bind(max_attempts)
         .execute(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?;
+        .await?;
         Ok(())
     }
 
@@ -79,7 +78,7 @@ impl JobQueue for PostgresJobQueue {
         lease_timeout: Duration,
     ) -> Result<Option<ClaimedJob>, JobQueueError> {
         let lease_seconds = duration_seconds(lease_timeout);
-        let mut transaction = self.pool.begin().await.map_err(map_sqlx_error)?;
+        let mut transaction = self.pool.begin().await?;
 
         // Requeue abandoned work. A job whose attempt budget was exhausted is
         // dead-lettered instead, so it cannot remain in `running` forever.
@@ -99,8 +98,7 @@ impl JobQueue for PostgresJobQueue {
         )
         .bind(lease_seconds)
         .execute(&mut *transaction)
-        .await
-        .map_err(map_sqlx_error)?;
+        .await?;
 
         let claimed = sqlx::query_as::<_, ClaimedJobRow>(
             r#"WITH candidate AS (
@@ -126,10 +124,9 @@ impl JobQueue for PostgresJobQueue {
         )
         .bind(worker_id)
         .fetch_optional(&mut *transaction)
-        .await
-        .map_err(map_sqlx_error)?;
+        .await?;
 
-        transaction.commit().await.map_err(map_sqlx_error)?;
+        transaction.commit().await?;
         claimed.map(ClaimedJobRow::into_application).transpose()
     }
 
@@ -146,8 +143,7 @@ impl JobQueue for PostgresJobQueue {
         .bind(job_id)
         .bind(worker_id)
         .execute(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?;
+        .await?;
 
         ensure_lease(result.rows_affected())
     }
@@ -183,8 +179,7 @@ impl JobQueue for PostgresJobQueue {
         .bind(retry_seconds)
         .bind(error)
         .fetch_optional(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?
+        .await?
         .ok_or(JobQueueError::LeaseLost)?;
 
         match row.status.as_str() {
@@ -219,8 +214,7 @@ impl JobQueue for PostgresJobQueue {
         .bind(completed_retention_seconds)
         .bind(dead_retention_seconds)
         .execute(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?;
+        .await?;
         Ok(result.rows_affected())
     }
 }
@@ -248,7 +242,9 @@ fn ensure_lease(rows_affected: u64) -> Result<(), JobQueueError> {
     }
 }
 
-fn map_sqlx_error(error: sqlx::Error) -> JobQueueError {
-    tracing::error!(error = ?error, "PostgreSQL job queue operation failed");
-    JobQueueError::Unavailable
+impl From<sqlx::Error> for JobQueueError {
+    fn from(error: sqlx::Error) -> Self {
+        tracing::error!(error = ?error, "PostgreSQL job queue operation failed");
+        JobQueueError::Unavailable
+    }
 }

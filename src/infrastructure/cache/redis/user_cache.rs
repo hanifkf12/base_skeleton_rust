@@ -50,8 +50,9 @@ impl TryFrom<CachedUser> for User {
     fn try_from(value: CachedUser) -> Result<Self, Self::Error> {
         Ok(User::restore(
             UserId::from_uuid(value.id),
-            Email::parse(value.email).map_err(|_| CacheError)?,
-            DisplayName::parse(value.display_name).map_err(|_| CacheError)?,
+            Email::parse(value.email).map_err(|e| CacheError::Unavailable(e.to_string()))?,
+            DisplayName::parse(value.display_name)
+                .map_err(|e| CacheError::Unavailable(e.to_string()))?,
             value.created_at,
             value.updated_at,
         ))
@@ -66,11 +67,11 @@ impl UserCache for RedisUserCache {
         let value: Option<String> = connection
             .get(Self::key(id))
             .await
-            .map_err(log_redis_error)?;
+            .map_err(CacheError::from)?;
         value
             .map(|json| {
                 serde_json::from_str::<CachedUser>(&json)
-                    .map_err(log_serialization_error)?
+                    .map_err(CacheError::from)?
                     .try_into()
             })
             .transpose()
@@ -79,12 +80,12 @@ impl UserCache for RedisUserCache {
     #[tracing::instrument(name = "infrastructure.redis.user_cache.set", skip(self, user), fields(db.system = "redis", user.id = %user.id(), cache.ttl_seconds = ttl_seconds))]
     async fn set(&self, user: &User, ttl_seconds: u64) -> Result<(), CacheError> {
         let json =
-            serde_json::to_string(&CachedUser::from(user)).map_err(log_serialization_error)?;
+            serde_json::to_string(&CachedUser::from(user)).map_err(CacheError::from)?;
         let mut connection = self.connection.clone();
         connection
             .set_ex::<_, _, ()>(Self::key(user.id()), json, ttl_seconds)
             .await
-            .map_err(log_redis_error)
+            .map_err(CacheError::from)
     }
 
     #[tracing::instrument(name = "infrastructure.redis.user_cache.delete", skip(self), fields(db.system = "redis", user.id = %id))]
@@ -93,16 +94,20 @@ impl UserCache for RedisUserCache {
         connection
             .del::<_, ()>(Self::key(id))
             .await
-            .map_err(log_redis_error)
+            .map_err(CacheError::from)
     }
 }
 
-fn log_redis_error(error: redis::RedisError) -> CacheError {
-    tracing::warn!(error = ?error, "Redis user cache operation failed");
-    CacheError
+impl From<redis::RedisError> for CacheError {
+    fn from(error: redis::RedisError) -> Self {
+        tracing::warn!(error = ?error, "Redis user cache operation failed");
+        CacheError::Unavailable(error.to_string())
+    }
 }
 
-fn log_serialization_error(error: serde_json::Error) -> CacheError {
-    tracing::warn!(error = ?error, "Redis user cache serialization failed");
-    CacheError
+impl From<serde_json::Error> for CacheError {
+    fn from(error: serde_json::Error) -> Self {
+        tracing::warn!(error = ?error, "Redis user cache serialization failed");
+        CacheError::Serialization(error.to_string())
+    }
 }

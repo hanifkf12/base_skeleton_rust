@@ -18,9 +18,17 @@ pub enum RepositoryError {
     Conflict,
 }
 
-#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
-#[error("the cache is unavailable")]
-pub struct CacheError;
+/// Errors that can be produced by the user cache.
+/// * **Unavailable** – the cache backend (e.g. Redis) failed.
+/// * **Serialization** – (de)serialization of a cached value failed.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum CacheError {
+    #[error("cache unavailable: {0}")]
+    Unavailable(String),
+
+    #[error("cache serialization error: {0}")]
+    Serialization(String),
+}
 
 #[async_trait]
 pub trait UserRepository: Send + Sync {
