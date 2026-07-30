@@ -14,7 +14,7 @@ LOCAL_TEST_DATABASE_URL ?= postgres://postgres:postgres@localhost:5432/base_skel
 
 .PHONY: help env deps-up deps-down deps-logs \
 	http worker all all-migrate \
-	db-migrate db-info db-revert \
+	db-migrate db-info db-revert migration-create \
 	fmt fmt-check clippy test test-postgres check build release audit ci \
 	docker-build docker-migrate docker-http docker-worker health
 
@@ -53,6 +53,10 @@ db-info: ## Show database migration status.
 
 db-revert: ## Revert the latest reversible migration.
 	$(CARGO) run -- db revert --yes
+
+migration-create: ## Create a timestamped SQL migration file. Usage: make migration-create name=add_users_status
+	@test -n "$(name)" || { echo "usage: make migration-create name=<snake_case_name>"; exit 1; }
+	$(CARGO) run -- migration:create $(name)
 
 fmt: ## Format all Rust source files.
 	$(CARGO) fmt --all
