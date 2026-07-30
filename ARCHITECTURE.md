@@ -661,14 +661,16 @@ docker compose ps
 Use a short, descriptive, snake-case name:
 
 ```bash
-sqlx migrate add create_orders
+cargo run -- migration:create create_orders
 ```
 
-SQLx creates a timestamped file similar to:
+The application creates a timestamped file similar to:
 
 ```text
 migrations/20260717120000_create_orders.sql
 ```
+
+`migration:create` needs no database connection or SQLx CLI. It creates forward-only migrations; use the SQLx CLI only when you need paired reversible `up` and `down` files.
 
 Edit that file with the forward schema change. Prefer explicit constraint and index names:
 
