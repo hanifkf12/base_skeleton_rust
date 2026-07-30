@@ -46,6 +46,7 @@ The repository includes a `Makefile` for common workflows. Run `make help` to li
 | `cargo run -- worker` | Start only the PostgreSQL worker |
 | `cargo run -- all` | Start HTTP and worker together |
 | `cargo run -- all --migrate` | Migrate, then start HTTP and worker together |
+| `cargo run -- migration:create <name>` | Create a timestamped forward-only SQL migration file |
 | `cargo run -- db migrate` | Apply pending migrations and exit |
 | `cargo run -- db info` | Show applied, pending, failed, or checksum-mismatched migrations |
 | `cargo run -- db revert --yes` | Revert the latest migration only when a matching down migration exists |
