@@ -28,6 +28,12 @@ pub enum Command {
         #[command(subcommand)]
         command: DatabaseCommand,
     },
+    /// Create a timestamped SQL migration file.
+    #[command(name = "migration:create", alias = "migration-create")]
+    MigrationCreate {
+        /// Short, descriptive, snake_case name for the migration.
+        name: String,
+    },
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
@@ -60,6 +66,14 @@ mod tests {
                 .unwrap()
                 .command,
             Command::All { migrate: true }
+        );
+        assert_eq!(
+            Cli::try_parse_from(["app", "migration:create", "add_users_status"])
+                .unwrap()
+                .command,
+            Command::MigrationCreate {
+                name: "add_users_status".to_owned(),
+            }
         );
     }
 
