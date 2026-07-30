@@ -79,8 +79,7 @@ impl UserCache for RedisUserCache {
 
     #[tracing::instrument(name = "infrastructure.redis.user_cache.set", skip(self, user), fields(db.system = "redis", user.id = %user.id(), cache.ttl_seconds = ttl_seconds))]
     async fn set(&self, user: &User, ttl_seconds: u64) -> Result<(), CacheError> {
-        let json =
-            serde_json::to_string(&CachedUser::from(user)).map_err(CacheError::from)?;
+        let json = serde_json::to_string(&CachedUser::from(user)).map_err(CacheError::from)?;
         let mut connection = self.connection.clone();
         connection
             .set_ex::<_, _, ()>(Self::key(user.id()), json, ttl_seconds)

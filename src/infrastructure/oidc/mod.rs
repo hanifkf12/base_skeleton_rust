@@ -195,8 +195,7 @@ impl AccessTokenVerifier for OidcAccessTokenVerifier {
         &self,
         access_token: &str,
     ) -> Result<AuthenticatedPrincipal, AccessTokenVerificationError> {
-        let header =
-            decode_header(access_token).map_err(AccessTokenVerificationError::from)?;
+        let header = decode_header(access_token).map_err(AccessTokenVerificationError::from)?;
         if !self.allowed_algorithms.contains(&header.alg) {
             return Err(AccessTokenVerificationError::InvalidToken);
         }
