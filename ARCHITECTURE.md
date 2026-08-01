@@ -784,7 +784,7 @@ After a migration has been shared or applied to any persistent environment:
 - Do not reorder it.
 - Do not delete it.
 
-SQLx verifies stored checksums and will reject a changed migration. Create a new migration to correct or extend the schema. Migration `0002_name_users_email_constraint.sql` demonstrates this pattern: it corrects the existing schema without modifying `0001_create_users.sql`.
+SQLx verifies stored checksums and will reject a changed migration. Create a new migration to correct or extend the schema. Migration `20260731000000_name_users_email_constraint` demonstrates this pattern: it corrects the existing schema without modifying `20260730000000_create_users`.
 
 ### Production-safe schema changes
 
@@ -846,10 +846,10 @@ The queue provides at-least-once processing, not exactly-once processing. A work
 ### Queue files and ownership
 
 ```text
-migrations/0003_create_background_jobs.sql
+migrations/20260801000000_create_background_jobs.up.sql
     Database schema, constraints, and queue indexes
 
-migrations/0004_add_background_job_trace_context.sql
+migrations/20260802000000_add_background_job_trace_context.up.sql
     Durable W3C trace context for asynchronous trace continuation
 
 src/application/job/
