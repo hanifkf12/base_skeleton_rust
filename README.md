@@ -46,12 +46,12 @@ The repository includes a `Makefile` for common workflows. Run `make help` to li
 | `cargo run -- worker` | Start only the PostgreSQL worker |
 | `cargo run -- all` | Start HTTP and worker together |
 | `cargo run -- all --migrate` | Migrate, then start HTTP and worker together |
-| `cargo run -- migration:create [--reversible] <name>` | Create a timestamped forward-only or reversible SQL migration |
+| `cargo run -- migration:create <name>` | Create a timestamped reversible migration file pair |
 | `cargo run -- db migrate` | Apply pending migrations and exit |
 | `cargo run -- db info` | Show applied, pending, failed, or checksum-mismatched migrations |
 | `cargo run -- db revert --yes` | Revert the latest migration only when a matching down migration exists |
 
-`db undo --yes` is an alias for `db revert --yes`. Migrations are forward-only by default; pass `--reversible` to `migration:create` to generate matching `.up.sql` and `.down.sql` files. The revert command intentionally refuses forward-only migrations. Prefer a new corrective migration for production rollbacks.
+`db undo --yes` is an alias for `db revert --yes`. Every `migration:create` generates a matching `.up.sql` and `.down.sql` pair, so the latest migration can always be reverted locally with `db revert --yes`. For production rollbacks, prefer a new corrective migration.
 
 Migration commands use `MIGRATION_DATABASE_URL` when configured and otherwise fall back to `DATABASE_URL`. This allows production to give schema privileges only to the migration process.
 

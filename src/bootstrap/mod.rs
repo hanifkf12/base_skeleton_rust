@@ -17,9 +17,7 @@ pub async fn run(command: Command) -> Result<()> {
         Command::Worker => run_worker().await,
         Command::All { migrate } => run_all(migrate).await,
         Command::Db { command } => database::run(command).await,
-        Command::MigrationCreate { name, reversible } => {
-            database::create_migration(&name, reversible)
-        }
+        Command::MigrationCreate { name } => database::create_migration(&name),
     }
 }
 

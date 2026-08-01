@@ -30,25 +30,19 @@ pub async fn run(command: DatabaseCommand) -> Result<()> {
     }
 }
 
-const FORWARD_ONLY_TEMPLATE: &str = "-- Write forward-only schema changes here.\n";
-const REVERSIBLE_UP_TEMPLATE: &str = "-- Write schema changes here.\n";
-const REVERSIBLE_DOWN_TEMPLATE: &str = "-- Write rollback changes here.\n";
+const UP_TEMPLATE: &str = "-- Write schema changes here.\n";
+const DOWN_TEMPLATE: &str = "-- Write rollback changes here.\n";
 
-pub fn create_migration(name: &str, reversible: bool) -> Result<()> {
+pub fn create_migration(name: &str) -> Result<()> {
     let migrations_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
     let version = Utc::now().format("%Y%m%d%H%M%S").to_string().parse()?;
-    for path in create_migration_file(&migrations_dir, name, version, reversible)? {
+    for path in create_migration_file(&migrations_dir, name, version)? {
         println!("created {}", path.display());
     }
     Ok(())
 }
 
-fn create_migration_file(
-    migrations_dir: &Path,
-    name: &str,
-    version: i64,
-    reversible: bool,
-) -> Result<Vec<PathBuf>> {
+fn create_migration_file(migrations_dir: &Path, name: &str, version: i64) -> Result<Vec<PathBuf>> {
     validate_migration_name(name)?;
     ensure!(
         migrations_dir.is_dir(),
@@ -57,23 +51,16 @@ fn create_migration_file(
     );
 
     let next_version = next_migration_version(migrations_dir, version)?;
-    let files = if reversible {
-        vec![
-            (
-                migrations_dir.join(format!("{next_version}_{name}.up.sql")),
-                REVERSIBLE_UP_TEMPLATE,
-            ),
-            (
-                migrations_dir.join(format!("{next_version}_{name}.down.sql")),
-                REVERSIBLE_DOWN_TEMPLATE,
-            ),
-        ]
-    } else {
-        vec![(
-            migrations_dir.join(format!("{next_version}_{name}.sql")),
-            FORWARD_ONLY_TEMPLATE,
-        )]
-    };
+    let files = vec![
+        (
+            migrations_dir.join(format!("{next_version}_{name}.up.sql")),
+            UP_TEMPLATE,
+        ),
+        (
+            migrations_dir.join(format!("{next_version}_{name}.down.sql")),
+            DOWN_TEMPLATE,
+        ),
+    ];
 
     write_new_migration_files(&files)?;
     Ok(files.into_iter().map(|(path, _)| path).collect())
@@ -250,7 +237,7 @@ async fn revert(confirmed: bool) -> Result<()> {
     });
     if !reversible {
         bail!(
-            "migration {latest_version} is forward-only and cannot be reverted; create a corrective migration"
+            "migration {latest_version} has no matching down migration and cannot be reverted; create a corrective migration"
         );
     }
 
@@ -276,10 +263,7 @@ async fn connect() -> Result<sqlx::PgPool> {
 mod tests {
     use std::{fs, path::PathBuf};
 
-    use super::{
-        FORWARD_ONLY_TEMPLATE, REVERSIBLE_DOWN_TEMPLATE, REVERSIBLE_UP_TEMPLATE,
-        create_migration_file, validate_migration_name,
-    };
+    use super::{DOWN_TEMPLATE, UP_TEMPLATE, create_migration_file, validate_migration_name};
 
     fn temporary_migrations_dir() -> PathBuf {
         let path =
@@ -289,37 +273,10 @@ mod tests {
     }
 
     #[test]
-    fn creates_a_timestamped_forward_only_migration() {
-        let migrations_dir = temporary_migrations_dir();
-        let paths = create_migration_file(
-            &migrations_dir,
-            "add_users_status",
-            20_260_730_123_456,
-            false,
-        )
-        .unwrap();
-
-        assert_eq!(
-            paths[0].file_name().unwrap(),
-            "20260730123456_add_users_status.sql"
-        );
-        assert_eq!(
-            fs::read_to_string(&paths[0]).unwrap(),
-            FORWARD_ONLY_TEMPLATE
-        );
-        fs::remove_dir_all(migrations_dir).unwrap();
-    }
-
-    #[test]
     fn creates_a_reversible_migration_pair() {
         let migrations_dir = temporary_migrations_dir();
-        let paths = create_migration_file(
-            &migrations_dir,
-            "add_users_status",
-            20_260_730_123_456,
-            true,
-        )
-        .unwrap();
+        let paths =
+            create_migration_file(&migrations_dir, "add_users_status", 20_260_730_123_456).unwrap();
 
         assert_eq!(
             paths[0].file_name().unwrap(),
@@ -329,14 +286,8 @@ mod tests {
             paths[1].file_name().unwrap(),
             "20260730123456_add_users_status.down.sql"
         );
-        assert_eq!(
-            fs::read_to_string(&paths[0]).unwrap(),
-            REVERSIBLE_UP_TEMPLATE
-        );
-        assert_eq!(
-            fs::read_to_string(&paths[1]).unwrap(),
-            REVERSIBLE_DOWN_TEMPLATE
-        );
+        assert_eq!(fs::read_to_string(&paths[0]).unwrap(), UP_TEMPLATE);
+        assert_eq!(fs::read_to_string(&paths[1]).unwrap(), DOWN_TEMPLATE);
         fs::remove_dir_all(migrations_dir).unwrap();
     }
 
@@ -344,22 +295,17 @@ mod tests {
     fn increments_a_conflicting_migration_version() {
         let migrations_dir = temporary_migrations_dir();
         fs::write(
-            migrations_dir.join("20260730123456_existing.sql"),
+            migrations_dir.join("20260730123456_existing.up.sql"),
             "-- existing\n",
         )
         .unwrap();
 
-        let paths = create_migration_file(
-            &migrations_dir,
-            "add_users_status",
-            20_260_730_123_456,
-            false,
-        )
-        .unwrap();
+        let paths =
+            create_migration_file(&migrations_dir, "add_users_status", 20_260_730_123_456).unwrap();
 
         assert_eq!(
             paths[0].file_name().unwrap(),
-            "20260730123457_add_users_status.sql"
+            "20260730123457_add_users_status.up.sql"
         );
         fs::remove_dir_all(migrations_dir).unwrap();
     }

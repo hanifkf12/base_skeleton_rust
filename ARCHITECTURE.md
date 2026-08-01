@@ -204,7 +204,7 @@ base_skeleton_rust
 ├── http
 ├── worker
 ├── all [--migrate]
-├── migration:create [--reversible] <name>
+├── migration:create <name>
 └── db
     ├── migrate
     ├── info
@@ -657,47 +657,15 @@ Confirm PostgreSQL is ready:
 docker compose ps
 ```
 
-### Create a forward-only migration
-
-Use a short, descriptive, snake-case name:
-
-```bash
-cargo run -- migration:create create_orders
-```
-
-The application creates a timestamped file similar to:
-
-```text
-migrations/20260717120000_create_orders.sql
-```
-
-`migration:create` needs no database connection or SQLx CLI. It creates a forward-only migration by default. Pass `--reversible` when the change has a genuinely safe rollback; the application then creates matching `.up.sql` and `.down.sql` files with the same version.
-
-Edit that file with the forward schema change. Prefer explicit constraint and index names:
-
-```sql
-ALTER TABLE users
-    ADD COLUMN status TEXT NOT NULL DEFAULT 'active';
-
-ALTER TABLE users
-    ADD CONSTRAINT users_status_allowed
-    CHECK (status IN ('active', 'suspended'));
-
-CREATE INDEX users_status_created_idx
-    ON users (status, created_at DESC, id DESC);
-```
-
-Do not add `IF NOT EXISTS` merely to hide schema drift. A migration should fail when the database is not in the expected state.
-
 ### Create a reversible migration
 
-For local development or schema changes with a genuinely safe rollback, ask the application to create paired files:
+`migration:create` needs no database connection or SQLx CLI. It always creates a matching `.up.sql` and `.down.sql` pair so every migration is locally reversible. Use a short, descriptive, snake-case name:
 
 ```bash
-cargo run -- migration:create --reversible add_users_status
+cargo run -- migration:create add_users_status
 ```
 
-This creates files similar to:
+The application creates timestamped files similar to:
 
 ```text
 migrations/20260717120500_add_users_status.up.sql
@@ -719,7 +687,18 @@ The `down` file reverses it:
 ALTER TABLE users DROP COLUMN status;
 ```
 
-Only write a down migration when rollback is safe. Dropping a column or table destroys data and is usually unsuitable for production rollback.
+Prefer explicit constraint and index names:
+
+```sql
+ALTER TABLE users
+    ADD CONSTRAINT users_status_allowed
+    CHECK (status IN ('active', 'suspended'));
+
+CREATE INDEX users_status_created_idx
+    ON users (status, created_at DESC, id DESC);
+```
+
+Do not add `IF NOT EXISTS` merely to hide schema drift. A migration should fail when the database is not in the expected state. For changes that cannot be safely rolled back, such as dropping a column or table that destroys data, still provide a down migration that documents the intended rollback (for example, restoring from a backup) rather than leaving it blank.
 
 ### Inspect pending and applied migrations
 
@@ -773,7 +752,7 @@ Inspect migration state afterward:
 cargo run -- db info
 ```
 
-`db revert` requires `--yes` and a reversible migration with a matching `.down.sql` file. `db undo` is an alias. The command refuses to revert the current forward-only migrations. For production incidents, prefer a new forward migration that corrects the schema; reverting application code and schema independently can cause compatibility failures.
+`db revert` requires `--yes` and a migration with a matching `.down.sql` file. `db undo` is an alias. Every `migration:create` creates a reversible pair, so the latest migration can always be reverted locally. For production incidents, prefer a new corrective migration; reverting application code and schema independently can cause compatibility failures.
 
 ### Never edit an applied migration
 

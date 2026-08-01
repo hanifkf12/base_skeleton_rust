@@ -28,14 +28,11 @@ pub enum Command {
         #[command(subcommand)]
         command: DatabaseCommand,
     },
-    /// Create a timestamped SQL migration file.
+    /// Create a timestamped reversible SQL migration file pair.
     #[command(name = "migration:create", alias = "migration-create")]
     MigrationCreate {
         /// Short, descriptive, snake_case name for the migration.
         name: String,
-        /// Create matching .up.sql and .down.sql files instead of a forward-only .sql file.
-        #[arg(long)]
-        reversible: bool,
     },
 }
 
@@ -76,21 +73,14 @@ mod tests {
                 .command,
             Command::MigrationCreate {
                 name: "add_users_status".to_owned(),
-                reversible: false,
             }
         );
         assert_eq!(
-            Cli::try_parse_from([
-                "app",
-                "migration:create",
-                "--reversible",
-                "add_users_status"
-            ])
-            .unwrap()
-            .command,
+            Cli::try_parse_from(["app", "migration-create", "add_users_status"])
+                .unwrap()
+                .command,
             Command::MigrationCreate {
                 name: "add_users_status".to_owned(),
-                reversible: true,
             }
         );
     }
