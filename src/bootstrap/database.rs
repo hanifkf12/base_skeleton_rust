@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
-    fs,
+    fs::{self, OpenOptions},
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -29,15 +30,25 @@ pub async fn run(command: DatabaseCommand) -> Result<()> {
     }
 }
 
-pub fn create_migration(name: &str) -> Result<()> {
+const FORWARD_ONLY_TEMPLATE: &str = "-- Write forward-only schema changes here.\n";
+const REVERSIBLE_UP_TEMPLATE: &str = "-- Write schema changes here.\n";
+const REVERSIBLE_DOWN_TEMPLATE: &str = "-- Write rollback changes here.\n";
+
+pub fn create_migration(name: &str, reversible: bool) -> Result<()> {
     let migrations_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
     let version = Utc::now().format("%Y%m%d%H%M%S").to_string().parse()?;
-    let path = create_migration_file(&migrations_dir, name, version)?;
-    println!("created {}", path.display());
+    for path in create_migration_file(&migrations_dir, name, version, reversible)? {
+        println!("created {}", path.display());
+    }
     Ok(())
 }
 
-fn create_migration_file(migrations_dir: &Path, name: &str, version: i64) -> Result<PathBuf> {
+fn create_migration_file(
+    migrations_dir: &Path,
+    name: &str,
+    version: i64,
+    reversible: bool,
+) -> Result<Vec<PathBuf>> {
     validate_migration_name(name)?;
     ensure!(
         migrations_dir.is_dir(),
@@ -46,10 +57,54 @@ fn create_migration_file(migrations_dir: &Path, name: &str, version: i64) -> Res
     );
 
     let next_version = next_migration_version(migrations_dir, version)?;
-    let path = migrations_dir.join(format!("{next_version}_{name}.sql"));
-    fs::write(&path, "-- Write forward-only schema changes here.\n")
+    let files = if reversible {
+        vec![
+            (
+                migrations_dir.join(format!("{next_version}_{name}.up.sql")),
+                REVERSIBLE_UP_TEMPLATE,
+            ),
+            (
+                migrations_dir.join(format!("{next_version}_{name}.down.sql")),
+                REVERSIBLE_DOWN_TEMPLATE,
+            ),
+        ]
+    } else {
+        vec![(
+            migrations_dir.join(format!("{next_version}_{name}.sql")),
+            FORWARD_ONLY_TEMPLATE,
+        )]
+    };
+
+    write_new_migration_files(&files)?;
+    Ok(files.into_iter().map(|(path, _)| path).collect())
+}
+
+fn write_new_migration_files(files: &[(PathBuf, &str)]) -> Result<()> {
+    let mut created = Vec::with_capacity(files.len());
+    for (path, contents) in files {
+        if let Err(error) = write_new_migration_file(path, contents) {
+            for created_path in &created {
+                let _ = fs::remove_file(created_path);
+            }
+            return Err(error);
+        }
+        created.push(path);
+    }
+    Ok(())
+}
+
+fn write_new_migration_file(path: &Path, contents: &str) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
         .with_context(|| format!("could not create migration file {}", path.display()))?;
-    Ok(path)
+    if let Err(error) = file.write_all(contents.as_bytes()) {
+        let _ = fs::remove_file(path);
+        return Err(error)
+            .with_context(|| format!("could not write migration file {}", path.display()));
+    }
+    Ok(())
 }
 
 fn validate_migration_name(name: &str) -> Result<()> {
@@ -221,7 +276,10 @@ async fn connect() -> Result<sqlx::PgPool> {
 mod tests {
     use std::{fs, path::PathBuf};
 
-    use super::{create_migration_file, validate_migration_name};
+    use super::{
+        FORWARD_ONLY_TEMPLATE, REVERSIBLE_DOWN_TEMPLATE, REVERSIBLE_UP_TEMPLATE,
+        create_migration_file, validate_migration_name,
+    };
 
     fn temporary_migrations_dir() -> PathBuf {
         let path =
@@ -233,16 +291,51 @@ mod tests {
     #[test]
     fn creates_a_timestamped_forward_only_migration() {
         let migrations_dir = temporary_migrations_dir();
-        let path =
-            create_migration_file(&migrations_dir, "add_users_status", 20_260_730_123_456).unwrap();
+        let paths = create_migration_file(
+            &migrations_dir,
+            "add_users_status",
+            20_260_730_123_456,
+            false,
+        )
+        .unwrap();
 
         assert_eq!(
-            path.file_name().unwrap(),
+            paths[0].file_name().unwrap(),
             "20260730123456_add_users_status.sql"
         );
         assert_eq!(
-            fs::read_to_string(&path).unwrap(),
-            "-- Write forward-only schema changes here.\n"
+            fs::read_to_string(&paths[0]).unwrap(),
+            FORWARD_ONLY_TEMPLATE
+        );
+        fs::remove_dir_all(migrations_dir).unwrap();
+    }
+
+    #[test]
+    fn creates_a_reversible_migration_pair() {
+        let migrations_dir = temporary_migrations_dir();
+        let paths = create_migration_file(
+            &migrations_dir,
+            "add_users_status",
+            20_260_730_123_456,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(
+            paths[0].file_name().unwrap(),
+            "20260730123456_add_users_status.up.sql"
+        );
+        assert_eq!(
+            paths[1].file_name().unwrap(),
+            "20260730123456_add_users_status.down.sql"
+        );
+        assert_eq!(
+            fs::read_to_string(&paths[0]).unwrap(),
+            REVERSIBLE_UP_TEMPLATE
+        );
+        assert_eq!(
+            fs::read_to_string(&paths[1]).unwrap(),
+            REVERSIBLE_DOWN_TEMPLATE
         );
         fs::remove_dir_all(migrations_dir).unwrap();
     }
@@ -256,11 +349,16 @@ mod tests {
         )
         .unwrap();
 
-        let path =
-            create_migration_file(&migrations_dir, "add_users_status", 20_260_730_123_456).unwrap();
+        let paths = create_migration_file(
+            &migrations_dir,
+            "add_users_status",
+            20_260_730_123_456,
+            false,
+        )
+        .unwrap();
 
         assert_eq!(
-            path.file_name().unwrap(),
+            paths[0].file_name().unwrap(),
             "20260730123457_add_users_status.sql"
         );
         fs::remove_dir_all(migrations_dir).unwrap();

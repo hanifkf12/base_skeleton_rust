@@ -54,9 +54,9 @@ db-info: ## Show database migration status.
 db-revert: ## Revert the latest reversible migration.
 	$(CARGO) run -- db revert --yes
 
-migration-create: ## Create a timestamped SQL migration file. Usage: make migration-create name=add_users_status
-	@test -n "$(name)" || { echo "usage: make migration-create name=<snake_case_name>"; exit 1; }
-	$(CARGO) run -- migration:create $(name)
+migration-create: ## Create a timestamped SQL migration file. Usage: make migration-create name=add_users_status [reversible=true]
+	@test -n "$(name)" || { echo "usage: make migration-create name=<snake_case_name> [reversible=true]"; exit 1; }
+	$(CARGO) run -- migration:create $(if $(filter true,$(reversible)),--reversible,) $(name)
 
 fmt: ## Format all Rust source files.
 	$(CARGO) fmt --all

@@ -729,6 +729,8 @@ Migration history:
 - `db info`: print each embedded migration as applied, pending, failed, or checksum-mismatched, and report versions missing from the binary.
 - `db revert --yes`: revert only when the latest applied version has an embedded down migration. Current forward-only migrations are intentionally not reversible.
 
+`migration:create <name>` creates a forward-only `.sql` migration by default. Use `migration:create --reversible <name>` to create matching `.up.sql` and `.down.sql` files for a deliberately reversible change.
+
 Never edit an applied migration. Add a corrective forward migration instead.
 
 ### Readiness definition

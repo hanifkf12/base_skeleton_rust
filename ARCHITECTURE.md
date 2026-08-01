@@ -204,6 +204,7 @@ base_skeleton_rust
 ├── http
 ├── worker
 ├── all [--migrate]
+├── migration:create [--reversible] <name>
 └── db
     ├── migrate
     ├── info
@@ -670,7 +671,7 @@ The application creates a timestamped file similar to:
 migrations/20260717120000_create_orders.sql
 ```
 
-`migration:create` needs no database connection or SQLx CLI. It creates forward-only migrations; use the SQLx CLI only when you need paired reversible `up` and `down` files.
+`migration:create` needs no database connection or SQLx CLI. It creates a forward-only migration by default. Pass `--reversible` when the change has a genuinely safe rollback; the application then creates matching `.up.sql` and `.down.sql` files with the same version.
 
 Edit that file with the forward schema change. Prefer explicit constraint and index names:
 
@@ -690,10 +691,10 @@ Do not add `IF NOT EXISTS` merely to hide schema drift. A migration should fail 
 
 ### Create a reversible migration
 
-For local development or schema changes with a genuinely safe rollback, create paired files:
+For local development or schema changes with a genuinely safe rollback, ask the application to create paired files:
 
 ```bash
-sqlx migrate add -r add_users_status
+cargo run -- migration:create --reversible add_users_status
 ```
 
 This creates files similar to:
@@ -703,7 +704,7 @@ migrations/20260717120500_add_users_status.up.sql
 migrations/20260717120500_add_users_status.down.sql
 ```
 
-After reversible migrations are introduced, SQLx CLI creates subsequent migrations as reversible pairs as well. Check both generated files before committing.
+Check both generated files before committing. Fill in the `up` file with the schema change and the `down` file with its safe rollback.
 
 The `up` file applies the change:
 
