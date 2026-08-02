@@ -6,9 +6,7 @@ use std::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
-use crate::{
-    domain::user::{DisplayName, Email, User, UserId},
-};
+use crate::domain::user::{DisplayName, Email, User, UserId};
 
 use super::{
     ApplicationError, CacheError, CreateUserInput, CreateUserUseCase, DeleteUserUseCase,
@@ -394,9 +392,7 @@ impl UserRepository for StaleReadRepository {
     ) -> Result<User, RepositoryError> {
         let stored = self.stored.lock().unwrap();
         match stored.as_ref() {
-            Some(existing) if existing.updated_at() == expected_updated_at => {
-                Ok(user.clone())
-            }
+            Some(existing) if existing.updated_at() == expected_updated_at => Ok(user.clone()),
             Some(_) => Err(RepositoryError::Conflict),
             None => Err(RepositoryError::NotFound),
         }

@@ -7,9 +7,7 @@ use crate::{
     domain::user::{DisplayName, Email, User},
 };
 
-use super::super::{
-    ApplicationError, CreateUserInput, UserCache, UserRegistrationRepository,
-};
+use super::super::{ApplicationError, CreateUserInput, UserCache, UserRegistrationRepository};
 
 const USER_CREATED_JOB: &str = "user.created";
 

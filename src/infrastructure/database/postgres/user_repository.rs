@@ -6,9 +6,7 @@ use uuid::Uuid;
 use crate::{
     application::{
         job::NewJob,
-        user::{
-            RepositoryError, UserRegistrationRepository, UserRepository, UserCreationJob,
-        },
+        user::{RepositoryError, UserCreationJob, UserRegistrationRepository, UserRepository},
     },
     domain::user::{DisplayName, Email, User, UserId},
     telemetry::current_trace_context,
@@ -121,12 +119,11 @@ impl UserRepository for PostgresUserRepository {
         else {
             // No row was updated: either the user is gone (NotFound) or its
             // updated_at changed concurrently (Conflict).
-            let exists = sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)",
-            )
-            .bind(user.id().as_uuid())
-            .fetch_one(&self.pool)
-            .await?;
+            let exists =
+                sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)")
+                    .bind(user.id().as_uuid())
+                    .fetch_one(&self.pool)
+                    .await?;
             return if exists {
                 Err(RepositoryError::Conflict)
             } else {

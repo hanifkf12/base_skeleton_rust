@@ -175,7 +175,12 @@ fn app_with_config(
     let repository: Arc<dyn UserRepository> = in_memory_repository;
     let cache: Arc<dyn UserCache> = Arc::new(NoOpCache);
     let state = AppState {
-        create_user: Arc::new(CreateUserUseCase::new(registration_repository, cache.clone(), 60, 5)),
+        create_user: Arc::new(CreateUserUseCase::new(
+            registration_repository,
+            cache.clone(),
+            60,
+            5,
+        )),
         get_user: Arc::new(GetUserUseCase::new(repository.clone(), cache.clone(), 60)),
         list_users: Arc::new(ListUsersUseCase::new(repository.clone())),
         update_user: Arc::new(UpdateUserUseCase::new(
