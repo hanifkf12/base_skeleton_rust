@@ -69,6 +69,7 @@ impl JobWorker {
         };
         let started = Instant::now();
 
+        let span = self.tracer.span(&job);
         let result = async {
             match self.handlers.get(job.job_type.as_str()) {
                 Some(handler) => handler.handle(&job).await,
@@ -78,22 +79,35 @@ impl JobWorker {
                 ))),
             }
         }
-        .instrument(self.tracer.span(&job))
+        .instrument(span.clone())
         .await;
 
         match result {
             Ok(()) => {
-                self.queue.complete(job.id, &self.worker_id).await?;
+                if let Err(error) = self.queue.complete(job.id, &self.worker_id).await {
+                    span.record("otel.status_code", "ERROR");
+                    span.record("otel.status_description", "complete_failed");
+                    return Err(error);
+                }
                 crate::telemetry::record_job_outcome(&job.job_type, "completed", started.elapsed());
                 tracing::info!(job_id = %job.id, job_type = %job.job_type, "job completed");
                 Ok(RunOutcome::Completed)
             }
             Err(error) => {
+                span.record("otel.status_code", "ERROR");
+                span.record("otel.status_description", "handler_failed");
                 let delay = retry_delay(self.retry_base, self.retry_max, job.attempts);
-                let disposition = self
+                let disposition = match self
                     .queue
                     .fail(job.id, &self.worker_id, &error.to_string(), delay)
-                    .await?;
+                    .await
+                {
+                    Ok(disposition) => disposition,
+                    Err(queue_error) => {
+                        span.record("otel.status_description", "fail_failed");
+                        return Err(queue_error);
+                    }
+                };
 
                 tracing::warn!(
                     job_id = %job.id,

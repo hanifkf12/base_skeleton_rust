@@ -25,7 +25,14 @@ pub struct Config {
     pub rate_limit_requests_per_minute: u32,
     pub rate_limit_burst: u32,
     pub trusted_proxy_cidrs: Vec<IpNet>,
-    pub metrics_prometheus_bearer_token: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct TelemetryConfig {
+    pub log_filter: String,
+    pub otlp_endpoint: Option<String>,
+    pub service_name: String,
+    pub prometheus_bearer_token: Option<String>,
 }
 
 #[derive(Clone)]
@@ -147,12 +154,29 @@ impl Config {
             rate_limit_requests_per_minute,
             rate_limit_burst,
             trusted_proxy_cidrs,
-            metrics_prometheus_bearer_token: optional("METRICS_PROMETHEUS_BEARER_TOKEN")?,
         })
     }
 
     pub fn migration_database_url_from_env() -> Result<String> {
         optional("MIGRATION_DATABASE_URL")?.map_or_else(|| required("DATABASE_URL"), Ok)
+    }
+}
+
+impl TelemetryConfig {
+    pub fn from_env() -> Result<Self> {
+        let log_filter = env::var("RUST_LOG")
+            .unwrap_or_else(|_| "base_skeleton_rust=info,tower_http=info".to_owned());
+        let otlp_endpoint = optional("OTEL_EXPORTER_OTLP_ENDPOINT")?;
+        let service_name =
+            env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| env!("CARGO_PKG_NAME").to_owned());
+        let prometheus_bearer_token = optional("METRICS_PROMETHEUS_BEARER_TOKEN")?;
+
+        Ok(Self {
+            log_filter,
+            otlp_endpoint,
+            service_name,
+            prometheus_bearer_token,
+        })
     }
 }
 

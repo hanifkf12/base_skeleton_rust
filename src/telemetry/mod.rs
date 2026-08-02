@@ -1,6 +1,7 @@
-use std::{collections::HashMap, env, sync::OnceLock, time::Duration};
+use std::{collections::HashMap, sync::OnceLock, time::Duration};
 
 use anyhow::Result;
+use axum::extract::MatchedPath;
 use opentelemetry::{
     KeyValue, global,
     metrics::{Counter, Histogram, UpDownCounter},
@@ -26,6 +27,7 @@ use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::Subscribe
 use crate::application::job::ClaimedJob;
 use crate::application::job::JobTracer;
 use crate::application::user::TraceContextProvider;
+use crate::config::TelemetryConfig;
 
 pub struct TelemetryGuard {
     tracer_provider: Option<SdkTracerProvider>,
@@ -65,33 +67,28 @@ impl TelemetryGuard {
     }
 }
 
-pub fn init() -> Result<TelemetryGuard> {
+pub fn init(config: &TelemetryConfig) -> Result<TelemetryGuard> {
     global::set_text_map_propagator(TraceContextPropagator::new());
 
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("base_skeleton_rust=debug,tower_http=debug"));
+    let filter = EnvFilter::try_new(&config.log_filter)
+        .unwrap_or_else(|_| EnvFilter::new("base_skeleton_rust=info,tower_http=info"));
     let logs = tracing_subscriber::fmt::layer()
         .json()
         .flatten_event(true)
         .with_current_span(true)
         .with_span_list(true);
 
-    let endpoint = env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
-        .ok()
-        .filter(|value| !value.trim().is_empty());
-
-    let service_name =
-        env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| env!("CARGO_PKG_NAME").to_owned());
-    let resource = Resource::builder().with_service_name(service_name).build();
-    let prometheus_enabled =
-        env::var("METRICS_PROMETHEUS_BEARER_TOKEN").is_ok_and(|value| !value.trim().is_empty());
+    let resource = Resource::builder()
+        .with_service_name(config.service_name.clone())
+        .build();
+    let prometheus_enabled = config.prometheus_bearer_token.is_some();
     let mut meter_builder = SdkMeterProvider::builder().with_resource(resource.clone());
     if prometheus_enabled {
         let exporter = PrometheusExporter::new();
         meter_builder = meter_builder.with_reader(exporter.clone());
         let _ = PROMETHEUS_EXPORTER.set(exporter);
     }
-    if endpoint.is_some() {
+    if config.otlp_endpoint.is_some() {
         let exporter = MetricExporter::builder().with_http().build()?;
         meter_builder = meter_builder.with_periodic_exporter(exporter);
     }
@@ -99,7 +96,7 @@ pub fn init() -> Result<TelemetryGuard> {
     global::set_meter_provider(meter_provider.clone());
     initialize_metrics();
 
-    let (tracer_provider, logger_provider) = if endpoint.is_some() {
+    let (tracer_provider, logger_provider) = if config.otlp_endpoint.is_some() {
         // Let the OTLP exporter read the generic endpoint from the environment.
         // It appends `/v1/traces` for `OTEL_EXPORTER_OTLP_ENDPOINT`, whereas a
         // programmatic endpoint is treated as an already-complete signal URL.
@@ -206,9 +203,16 @@ pub fn http_request_finished(method: &str, route: &str, status: u16, duration: D
     }
 }
 
-pub fn record_rate_limit_rejection() {
+pub fn record_rate_limit_rejection(method: &str, route: &str, status: u16) {
     if let Some(metrics) = METRICS.get() {
-        metrics.rate_limit_rejections.add(1, &[]);
+        metrics.rate_limit_rejections.add(
+            1,
+            &[
+                KeyValue::new("http.request.method", method.to_owned()),
+                KeyValue::new("http.route", route.to_owned()),
+                KeyValue::new("http.response.status_code", i64::from(status)),
+            ],
+        );
     }
 }
 
@@ -255,6 +259,8 @@ pub fn job_span(job: &ClaimedJob) -> Span {
         job.id = %job.id,
         job.type = %job.job_type,
         job.attempt = job.attempts,
+        otel.status_code = tracing::field::Empty,
+        otel.status_description = tracing::field::Empty,
         trace_id = tracing::field::Empty,
         span_id = tracing::field::Empty,
     );
@@ -266,12 +272,16 @@ pub fn job_span(job: &ClaimedJob) -> Span {
 pub fn http_span<B>(request: &axum::http::Request<B>) -> Span {
     let carrier = HeaderCarrier(request.headers());
     let parent = global::get_text_map_propagator(|propagator| propagator.extract(&carrier));
+    let route = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map_or("unmatched", MatchedPath::as_str);
     let span = tracing::info_span!(
         "http.request",
-        otel.name = %format!("{} {}", request.method(), request.uri().path()),
+        otel.name = %format!("{} {route}", request.method()),
         otel.kind = "server",
         http.request.method = %request.method(),
-        url.path = %request.uri().path(),
+        http.route = %route,
         http.response.status_code = tracing::field::Empty,
         otel.status_code = tracing::field::Empty,
         otel.status_description = tracing::field::Empty,
