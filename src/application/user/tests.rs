@@ -5,28 +5,30 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use serde_json::{Value, json};
 
 use crate::{
-    application::job::NewJob,
     domain::user::{DisplayName, Email, User, UserId},
 };
 
 use super::{
     ApplicationError, CacheError, CreateUserInput, CreateUserUseCase, DeleteUserUseCase,
-    GetUserUseCase, ListUsersInput, ListUsersUseCase, RepositoryError, TraceContextProvider,
-    UpdateUserInput, UpdateUserUseCase, UserCache, UserRegistrationRepository, UserRepository,
+    GetUserUseCase, ListUsersInput, ListUsersUseCase, RepositoryError, UpdateUserInput,
+    UpdateUserUseCase, UserCache, UserCreationJob, UserRegistrationRepository, UserRepository,
 };
 
 #[derive(Default)]
 struct FakeUserRepository {
     users: Mutex<HashMap<UserId, User>>,
-    jobs: Mutex<Vec<NewJob>>,
+    jobs: Mutex<Vec<UserCreationJob>>,
 }
 
 #[async_trait]
 impl UserRegistrationRepository for FakeUserRepository {
-    async fn create_with_job(&self, user: &User, job: &NewJob) -> Result<User, RepositoryError> {
+    async fn create_with_job(
+        &self,
+        user: &User,
+        job: &UserCreationJob,
+    ) -> Result<User, RepositoryError> {
         let created = self.create(user).await?;
         self.jobs.lock().unwrap().push(job.clone());
         Ok(created)
@@ -67,15 +69,15 @@ impl UserRepository for FakeUserRepository {
         &self,
         user: &User,
         expected_updated_at: &DateTime<Utc>,
-    ) -> Result<Option<User>, RepositoryError> {
+    ) -> Result<User, RepositoryError> {
         let mut users = self.users.lock().unwrap();
         match users.get(&user.id()) {
             Some(existing) if existing.updated_at() == expected_updated_at => {
                 users.insert(user.id(), user.clone());
-                Ok(Some(user.clone()))
+                Ok(user.clone())
             }
-            Some(_) => Ok(None),
-            None => Ok(None),
+            Some(_) => Err(RepositoryError::Conflict),
+            None => Err(RepositoryError::NotFound),
         }
     }
 
@@ -106,25 +108,11 @@ impl UserCache for FakeUserCache {
     }
 }
 
-struct NoOpTraceContext;
-
-impl TraceContextProvider for NoOpTraceContext {
-    fn current(&self) -> Value {
-        json!({})
-    }
-}
-
 #[tokio::test]
 async fn create_user_validates_and_populates_cache() {
     let repository = Arc::new(FakeUserRepository::default());
     let cache = Arc::new(FakeUserCache::default());
-    let use_case = CreateUserUseCase::new(
-        repository.clone(),
-        cache.clone(),
-        Arc::new(NoOpTraceContext),
-        60,
-        5,
-    );
+    let use_case = CreateUserUseCase::new(repository.clone(), cache.clone(), 60, 5);
 
     let user = use_case
         .execute(CreateUserInput {
@@ -285,13 +273,7 @@ async fn list_users_returns_paginated_results() {
 async fn create_user_rejects_duplicate_email() {
     let repository = Arc::new(FakeUserRepository::default());
     let cache = Arc::new(FakeUserCache::default());
-    let use_case = CreateUserUseCase::new(
-        repository.clone(),
-        cache.clone(),
-        Arc::new(NoOpTraceContext),
-        60,
-        5,
-    );
+    let use_case = CreateUserUseCase::new(repository.clone(), cache.clone(), 60, 5);
 
     use_case
         .execute(CreateUserInput {
@@ -409,14 +391,14 @@ impl UserRepository for StaleReadRepository {
         &self,
         user: &User,
         expected_updated_at: &DateTime<Utc>,
-    ) -> Result<Option<User>, RepositoryError> {
+    ) -> Result<User, RepositoryError> {
         let stored = self.stored.lock().unwrap();
         match stored.as_ref() {
             Some(existing) if existing.updated_at() == expected_updated_at => {
-                Ok(Some(user.clone()))
+                Ok(user.clone())
             }
-            Some(_) => Ok(None),
-            None => Ok(None),
+            Some(_) => Err(RepositoryError::Conflict),
+            None => Err(RepositoryError::NotFound),
         }
     }
 
@@ -427,7 +409,11 @@ impl UserRepository for StaleReadRepository {
 
 #[async_trait]
 impl UserRegistrationRepository for StaleReadRepository {
-    async fn create_with_job(&self, _user: &User, _job: &NewJob) -> Result<User, RepositoryError> {
+    async fn create_with_job(
+        &self,
+        _user: &User,
+        _job: &UserCreationJob,
+    ) -> Result<User, RepositoryError> {
         unimplemented!()
     }
 }

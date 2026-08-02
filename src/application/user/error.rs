@@ -23,6 +23,7 @@ impl From<RepositoryError> for ApplicationError {
         match error {
             RepositoryError::DuplicateEmail => Self::EmailAlreadyExists,
             RepositoryError::Conflict => Self::Conflict,
+            RepositoryError::NotFound => Self::NotFound,
             RepositoryError::Unavailable => Self::DependencyUnavailable,
         }
     }

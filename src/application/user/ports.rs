@@ -3,10 +3,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::{
-    application::job::NewJob,
-    domain::user::{User, UserId},
-};
+use crate::domain::user::{User, UserId};
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum RepositoryError {
@@ -16,6 +13,18 @@ pub enum RepositoryError {
     Unavailable,
     #[error("the entity was modified by another operation")]
     Conflict,
+    #[error("the entity was not found")]
+    NotFound,
+}
+
+/// The initial background job that must be persisted atomically with a new
+/// user. This is the user feature's own neutral contract; the repository
+/// adapter is responsible for mapping it to the job subsystem.
+#[derive(Debug, Clone)]
+pub struct UserCreationJob {
+    pub job_type: String,
+    pub payload: Value,
+    pub max_attempts: u32,
 }
 
 /// Errors that can be produced by the user cache.
@@ -39,14 +48,18 @@ pub trait UserRepository: Send + Sync {
         &self,
         user: &User,
         expected_updated_at: &DateTime<Utc>,
-    ) -> Result<Option<User>, RepositoryError>;
+    ) -> Result<User, RepositoryError>;
     async fn delete(&self, id: UserId) -> Result<bool, RepositoryError>;
 }
 
 /// Persists a new user and its first background job atomically.
 #[async_trait]
 pub trait UserRegistrationRepository: Send + Sync {
-    async fn create_with_job(&self, user: &User, job: &NewJob) -> Result<User, RepositoryError>;
+    async fn create_with_job(
+        &self,
+        user: &User,
+        job: &UserCreationJob,
+    ) -> Result<User, RepositoryError>;
 }
 
 /// Cache misses are `Ok(None)`. All TTL values are whole seconds.

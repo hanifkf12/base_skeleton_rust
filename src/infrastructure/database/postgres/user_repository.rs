@@ -6,9 +6,12 @@ use uuid::Uuid;
 use crate::{
     application::{
         job::NewJob,
-        user::{RepositoryError, UserRegistrationRepository, UserRepository},
+        user::{
+            RepositoryError, UserRegistrationRepository, UserRepository, UserCreationJob,
+        },
     },
     domain::user::{DisplayName, Email, User, UserId},
+    telemetry::current_trace_context,
 };
 
 pub struct PostgresUserRepository {
@@ -100,8 +103,8 @@ impl UserRepository for PostgresUserRepository {
         &self,
         user: &User,
         expected_updated_at: &DateTime<Utc>,
-    ) -> Result<Option<User>, RepositoryError> {
-        sqlx::query_as::<_, UserRow>(
+    ) -> Result<User, RepositoryError> {
+        let Some(updated) = sqlx::query_as::<_, UserRow>(
             r#"UPDATE users SET email = $2, display_name = $3, updated_at = $4
                WHERE id = $1 AND updated_at = $5
                RETURNING id, email, display_name, created_at, updated_at"#,
@@ -114,7 +117,23 @@ impl UserRepository for PostgresUserRepository {
         .fetch_optional(&self.pool)
         .await?
         .map(UserRow::into_domain)
-        .transpose()
+        .transpose()?
+        else {
+            // No row was updated: either the user is gone (NotFound) or its
+            // updated_at changed concurrently (Conflict).
+            let exists = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)",
+            )
+            .bind(user.id().as_uuid())
+            .fetch_one(&self.pool)
+            .await?;
+            return if exists {
+                Err(RepositoryError::Conflict)
+            } else {
+                Err(RepositoryError::NotFound)
+            };
+        };
+        Ok(updated)
     }
 
     #[tracing::instrument(name = "infrastructure.postgres.user.delete", skip(self), fields(db.system = "postgresql", user.id = %id))]
@@ -129,8 +148,12 @@ impl UserRepository for PostgresUserRepository {
 
 #[async_trait]
 impl UserRegistrationRepository for PostgresUserRepository {
-    #[tracing::instrument(name = "infrastructure.postgres.user.create_with_job", skip(self, user, job), fields(db.system = "postgresql", user.id = %user.id(), job.id = %job.id, job.type = %job.job_type))]
-    async fn create_with_job(&self, user: &User, job: &NewJob) -> Result<User, RepositoryError> {
+    #[tracing::instrument(name = "infrastructure.postgres.user.create_with_job", skip(self, user, job), fields(db.system = "postgresql", user.id = %user.id(), job.type = %job.job_type))]
+    async fn create_with_job(
+        &self,
+        user: &User,
+        job: &UserCreationJob,
+    ) -> Result<User, RepositoryError> {
         let max_attempts = i32::try_from(job.max_attempts).map_err(|error| {
             tracing::error!(%error, max_attempts = job.max_attempts, "max_attempts is too large");
             RepositoryError::Unavailable
@@ -139,6 +162,11 @@ impl UserRegistrationRepository for PostgresUserRepository {
             tracing::error!("max_attempts must be greater than zero");
             return Err(RepositoryError::Unavailable);
         }
+
+        // The job subsystem owns the NewJob envelope; the adapter assembles it
+        // and stamps the current W3C trace context captured from the request.
+        let new_job = NewJob::new(job.job_type.clone(), job.payload.clone(), job.max_attempts)
+            .with_trace_context(current_trace_context());
 
         let mut transaction = self.pool.begin().await?;
 
@@ -159,10 +187,10 @@ impl UserRegistrationRepository for PostgresUserRepository {
             r#"INSERT INTO background_jobs (id, job_type, payload, trace_context, max_attempts)
                VALUES ($1, $2, $3, $4, $5)"#,
         )
-        .bind(job.id)
-        .bind(&job.job_type)
-        .bind(&job.payload)
-        .bind(&job.trace_context)
+        .bind(new_job.id)
+        .bind(&new_job.job_type)
+        .bind(&new_job.payload)
+        .bind(&new_job.trace_context)
         .bind(max_attempts)
         .execute(&mut *transaction)
         .await?;

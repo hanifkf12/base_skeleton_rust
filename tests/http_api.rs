@@ -12,10 +12,9 @@ use base_skeleton_rust::{
     application::{
         auth::{AccessTokenVerificationError, AccessTokenVerifier, AuthenticatedPrincipal},
         health::ReadinessCheck,
-        job::NewJob,
         user::{
             CacheError, CreateUserUseCase, DeleteUserUseCase, GetUserUseCase, ListUsersUseCase,
-            RepositoryError, TraceContextProvider, UpdateUserUseCase, UserCache,
+            RepositoryError, UpdateUserUseCase, UserCache, UserCreationJob,
             UserRegistrationRepository, UserRepository,
         },
     },
@@ -66,15 +65,15 @@ impl UserRepository for InMemoryUserRepository {
         &self,
         user: &User,
         expected_updated_at: &DateTime<Utc>,
-    ) -> Result<Option<User>, RepositoryError> {
+    ) -> Result<User, RepositoryError> {
         let mut users = self.users.lock().unwrap();
         match users.get(&user.id()) {
             Some(existing) if existing.updated_at() == expected_updated_at => {
                 users.insert(user.id(), user.clone());
-                Ok(Some(user.clone()))
+                Ok(user.clone())
             }
-            Some(_) => Ok(None),
-            None => Ok(None),
+            Some(_) => Err(RepositoryError::Conflict),
+            None => Err(RepositoryError::NotFound),
         }
     }
 
@@ -85,7 +84,11 @@ impl UserRepository for InMemoryUserRepository {
 
 #[async_trait]
 impl UserRegistrationRepository for InMemoryUserRepository {
-    async fn create_with_job(&self, user: &User, _job: &NewJob) -> Result<User, RepositoryError> {
+    async fn create_with_job(
+        &self,
+        user: &User,
+        _job: &UserCreationJob,
+    ) -> Result<User, RepositoryError> {
         self.create(user).await
     }
 }
@@ -113,14 +116,6 @@ struct AlwaysReady;
 impl ReadinessCheck for AlwaysReady {
     async fn is_ready(&self) -> bool {
         true
-    }
-}
-
-struct NoOpTraceContext;
-
-impl TraceContextProvider for NoOpTraceContext {
-    fn current(&self) -> Value {
-        json!({})
     }
 }
 
@@ -179,15 +174,8 @@ fn app_with_config(
     let registration_repository: Arc<dyn UserRegistrationRepository> = in_memory_repository.clone();
     let repository: Arc<dyn UserRepository> = in_memory_repository;
     let cache: Arc<dyn UserCache> = Arc::new(NoOpCache);
-    let trace_context: Arc<dyn TraceContextProvider> = Arc::new(NoOpTraceContext);
     let state = AppState {
-        create_user: Arc::new(CreateUserUseCase::new(
-            registration_repository,
-            cache.clone(),
-            trace_context,
-            60,
-            5,
-        )),
+        create_user: Arc::new(CreateUserUseCase::new(registration_repository, cache.clone(), 60, 5)),
         get_user: Arc::new(GetUserUseCase::new(repository.clone(), cache.clone(), 60)),
         list_users: Arc::new(ListUsersUseCase::new(repository.clone())),
         update_user: Arc::new(UpdateUserUseCase::new(
