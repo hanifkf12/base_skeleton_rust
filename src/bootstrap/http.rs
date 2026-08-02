@@ -5,7 +5,7 @@ use tokio::{net::TcpListener, sync::watch};
 
 use crate::{
     application::auth::AccessTokenVerifier,
-    config::{Config, OidcConfig},
+    config::{Config, OidcConfig, TelemetryConfig},
     infrastructure::oidc::OidcAccessTokenVerifier,
     presentation::http::{RouterConfig, build_router},
 };
@@ -15,6 +15,7 @@ use super::{dependencies::build_dependencies, shutdown};
 pub async fn run(
     config: Config,
     oidc_config: OidcConfig,
+    telemetry_config: &TelemetryConfig,
     mut shutdown_receiver: watch::Receiver<bool>,
 ) -> Result<()> {
     let access_token_verifier: Arc<dyn AccessTokenVerifier> =
@@ -30,7 +31,7 @@ pub async fn run(
             rate_limit_requests_per_minute: config.rate_limit_requests_per_minute,
             rate_limit_burst: config.rate_limit_burst,
             trusted_proxy_cidrs: config.trusted_proxy_cidrs,
-            metrics_prometheus_bearer_token: config.metrics_prometheus_bearer_token,
+            metrics_prometheus_bearer_token: telemetry_config.prometheus_bearer_token.clone(),
         },
     );
     let listener = TcpListener::bind(config.server_address)

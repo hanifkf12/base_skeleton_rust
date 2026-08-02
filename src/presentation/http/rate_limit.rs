@@ -11,6 +11,9 @@ use ipnet::IpNet;
 use serde_json::json;
 use tower_governor::{GovernorError, key_extractor::KeyExtractor};
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RateLimitRejection;
+
 #[derive(Clone, Debug)]
 pub struct TrustedProxyIpKeyExtractor {
     trusted_proxy_cidrs: Vec<IpNet>,
@@ -66,7 +69,6 @@ impl KeyExtractor for TrustedProxyIpKeyExtractor {
 pub fn error_response(error: GovernorError) -> Response<Body> {
     match error {
         GovernorError::TooManyRequests { wait_time, .. } => {
-            crate::telemetry::record_rate_limit_rejection();
             let mut response = (
                 StatusCode::TOO_MANY_REQUESTS,
                 Json(json!({
@@ -77,6 +79,7 @@ pub fn error_response(error: GovernorError) -> Response<Body> {
                 })),
             )
                 .into_response();
+            response.extensions_mut().insert(RateLimitRejection);
             response.headers_mut().insert(
                 header::RETRY_AFTER,
                 wait_time

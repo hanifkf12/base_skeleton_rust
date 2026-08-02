@@ -8,30 +8,36 @@ use anyhow::{Result, ensure};
 
 use crate::{
     cli::{Command, DatabaseCommand},
-    config::{Config, OidcConfig},
+    config::{Config, OidcConfig, TelemetryConfig},
+    telemetry,
 };
 
 pub async fn run(command: Command) -> Result<()> {
-    match command {
-        Command::Http => run_http().await,
-        Command::Worker => run_worker().await,
-        Command::All { migrate } => run_all(migrate).await,
+    dotenvy::dotenv().ok();
+    let telemetry_config = TelemetryConfig::from_env()?;
+    let telemetry = telemetry::init(&telemetry_config)?;
+    let result = match command {
+        Command::Http => run_http(&telemetry_config).await,
+        Command::Worker => run_worker(&telemetry_config).await,
+        Command::All { migrate } => run_all(migrate, &telemetry_config).await,
         Command::Db { command } => database::run(command).await,
         Command::MigrationCreate { name } => database::create_migration(&name),
-    }
+    };
+    telemetry.shutdown();
+    result
 }
 
-async fn run_http() -> Result<()> {
+async fn run_http(telemetry_config: &TelemetryConfig) -> Result<()> {
     let config = Config::from_env()?;
     let oidc_config = OidcConfig::from_env()?;
     let (sender, receiver) = shutdown::channel();
     let signal_task = tokio::spawn(shutdown::notify_on_signal(sender));
-    let result = http::run(config, oidc_config, receiver).await;
+    let result = http::run(config, oidc_config, telemetry_config, receiver).await;
     signal_task.abort();
     result
 }
 
-async fn run_worker() -> Result<()> {
+async fn run_worker(_telemetry_config: &TelemetryConfig) -> Result<()> {
     let config = Config::from_env()?;
     let (sender, receiver) = shutdown::channel();
     let signal_task = tokio::spawn(shutdown::notify_on_signal(sender));
@@ -40,7 +46,7 @@ async fn run_worker() -> Result<()> {
     result
 }
 
-async fn run_all(run_migrations: bool) -> Result<()> {
+async fn run_all(run_migrations: bool, telemetry_config: &TelemetryConfig) -> Result<()> {
     let config = Config::from_env()?;
     let (http_connections, worker_connections) =
         split_all_mode_connections(config.database_max_connections)?;
@@ -57,7 +63,7 @@ async fn run_all(run_migrations: bool) -> Result<()> {
     let mut worker_config = config.clone();
     worker_config.database_max_connections = worker_connections;
 
-    let http = http::run(http_config, oidc_config, receiver.clone());
+    let http = http::run(http_config, oidc_config, telemetry_config, receiver.clone());
     let worker = worker::run(worker_config, receiver);
     tokio::pin!(http, worker);
 

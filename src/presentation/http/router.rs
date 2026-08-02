@@ -28,7 +28,7 @@ use super::{
     AppState,
     auth::{ScopeRequirement, require_scope},
     health, metrics,
-    rate_limit::{self, TrustedProxyIpKeyExtractor},
+    rate_limit::{self, RateLimitRejection, TrustedProxyIpKeyExtractor},
     user::{create_user, delete_user, get_user, list_users, update_user},
 };
 
@@ -138,6 +138,9 @@ async fn record_http_metrics(request: axum::http::Request<Body>, next: Next) -> 
         response.status().as_u16(),
         started.elapsed(),
     );
+    if response.extensions().get::<RateLimitRejection>().is_some() {
+        crate::telemetry::record_rate_limit_rejection(&method, route, response.status().as_u16());
+    }
     response
 }
 
@@ -150,5 +153,16 @@ fn normalized_route(path: &str) -> &'static str {
         "/api/v1/users" => "/api/v1/users",
         _ if path.starts_with("/api/v1/users/") => "/api/v1/users/{id}",
         _ => "unmatched",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalized_route;
+
+    #[test]
+    fn normalizes_dynamic_and_unknown_paths() {
+        assert_eq!(normalized_route("/api/v1/users/3f3e"), "/api/v1/users/{id}");
+        assert_eq!(normalized_route("/not-a-route?token=secret"), "unmatched");
     }
 }
