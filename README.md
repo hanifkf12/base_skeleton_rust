@@ -13,7 +13,7 @@ cargo run -- db migrate
 cargo run -- all
 ```
 
-Before running `http` or `all`, replace the example OIDC values in `.env` by following [Set up authorization](#set-up-authorization). The values in `.env.example` are placeholders and cannot authenticate requests.
+`docker compose up` starts PostgreSQL, Redis, and a local Keycloak with a `demo` realm pre-configured for this API (`keycloak/demo-realm.json`: `base-skeleton-api` audience, `postman-local` PKCE client, `users:read`/`users:write` scopes). The `.env.example` OIDC values work against it as-is; admin console is at http://localhost:8081 (`admin`/`admin`). For a real identity provider, replace the example OIDC values by following [Set up authorization](#set-up-authorization).
 
 `all` runs HTTP and the worker in one process for local or simple deployments. To run them as independently scalable production processes:
 
