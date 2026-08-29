@@ -1,12 +1,19 @@
 FROM rust:1.93-bookworm AS builder
 
 WORKDIR /app
+# Stub build warms the dependency layer; real sources are copied after so
+# source edits don't recompile every crate.
 COPY Cargo.toml Cargo.lock build.rs ./
+RUN mkdir src && echo 'fn main() {}' > src/main.rs && echo '' > src/lib.rs \
+    && cargo build --release --locked \
+    && rm -rf src
 COPY migrations ./migrations
 COPY src ./src
-RUN cargo build --release --locked
+# Docker COPY preserves mtimes, so the copied sources can look older than the
+# stub build and cargo would reuse the stub lib. Force a workspace rebuild.
+RUN touch src/main.rs src/lib.rs && cargo build --release --locked
 
-FROM debian:bookworm-slim AS runtime
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS runtime
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends ca-certificates curl \

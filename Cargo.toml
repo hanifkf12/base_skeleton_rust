@@ -2,6 +2,8 @@
 name = "base_skeleton_rust"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.93"
+license = "MIT"
 default-run = "base_skeleton_rust"
 
 [dependencies]
