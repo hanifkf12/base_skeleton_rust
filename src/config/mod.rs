@@ -55,82 +55,27 @@ impl Config {
         let server_address = format!("{host}:{port}")
             .parse()
             .context("APP_HOST and APP_PORT must form a valid socket address")?;
-        let database_max_connections = parse_or("DATABASE_MAX_CONNECTIONS", 10)?;
-        let redis_connect_timeout_seconds = parse_or("REDIS_CONNECT_TIMEOUT_SECONDS", 3)?;
-        let user_cache_ttl_seconds = parse_or("USER_CACHE_TTL_SECONDS", 300)?;
-        let request_timeout_seconds = parse_or("REQUEST_TIMEOUT_SECONDS", 10)?;
-        let max_request_body_bytes = parse_or("MAX_REQUEST_BODY_BYTES", 65_536)?;
-        let job_poll_interval_milliseconds = parse_or("JOB_POLL_INTERVAL_MILLISECONDS", 1_000)?;
-        let job_lease_timeout_seconds = parse_or("JOB_LEASE_TIMEOUT_SECONDS", 300)?;
-        let job_retry_base_seconds = parse_or("JOB_RETRY_BASE_SECONDS", 5)?;
-        let job_retry_max_seconds = parse_or("JOB_RETRY_MAX_SECONDS", 300)?;
-        let job_max_attempts = parse_or("JOB_MAX_ATTEMPTS", 5)?;
-        let job_completed_retention_seconds = parse_or("JOB_COMPLETED_RETENTION_SECONDS", 86_400)?;
-        let job_dead_retention_seconds = parse_or("JOB_DEAD_RETENTION_SECONDS", 2_592_000)?;
-        let job_cleanup_interval_seconds = parse_or("JOB_CLEANUP_INTERVAL_SECONDS", 3_600)?;
-        let rate_limit_requests_per_minute = parse_or("RATE_LIMIT_REQUESTS_PER_MINUTE", 120)?;
-        let rate_limit_burst = parse_or("RATE_LIMIT_BURST", 30)?;
+        let database_max_connections = positive_or("DATABASE_MAX_CONNECTIONS", 10)?;
+        let redis_connect_timeout_seconds = positive_or("REDIS_CONNECT_TIMEOUT_SECONDS", 3)?;
+        let user_cache_ttl_seconds = positive_or("USER_CACHE_TTL_SECONDS", 300)?;
+        let request_timeout_seconds = positive_or("REQUEST_TIMEOUT_SECONDS", 10)?;
+        let max_request_body_bytes = positive_or("MAX_REQUEST_BODY_BYTES", 65_536)?;
+        let job_poll_interval_milliseconds = positive_or("JOB_POLL_INTERVAL_MILLISECONDS", 1_000)?;
+        let job_lease_timeout_seconds = positive_or("JOB_LEASE_TIMEOUT_SECONDS", 300)?;
+        let job_retry_base_seconds = positive_or("JOB_RETRY_BASE_SECONDS", 5)?;
+        let job_retry_max_seconds = positive_or("JOB_RETRY_MAX_SECONDS", 300)?;
+        let job_max_attempts = positive_or("JOB_MAX_ATTEMPTS", 5)?;
+        let job_completed_retention_seconds =
+            positive_or("JOB_COMPLETED_RETENTION_SECONDS", 86_400)?;
+        let job_dead_retention_seconds = positive_or("JOB_DEAD_RETENTION_SECONDS", 2_592_000)?;
+        let job_cleanup_interval_seconds = positive_or("JOB_CLEANUP_INTERVAL_SECONDS", 3_600)?;
+        let rate_limit_requests_per_minute = positive_or("RATE_LIMIT_REQUESTS_PER_MINUTE", 120)?;
+        let rate_limit_burst = positive_or("RATE_LIMIT_BURST", 30)?;
         let trusted_proxy_cidrs = parse_cidrs("TRUSTED_PROXY_CIDRS")?;
 
         ensure!(
-            database_max_connections > 0,
-            "DATABASE_MAX_CONNECTIONS must be greater than zero"
-        );
-        ensure!(
-            redis_connect_timeout_seconds > 0,
-            "REDIS_CONNECT_TIMEOUT_SECONDS must be greater than zero"
-        );
-        ensure!(
-            user_cache_ttl_seconds > 0,
-            "USER_CACHE_TTL_SECONDS must be greater than zero"
-        );
-        ensure!(
-            request_timeout_seconds > 0,
-            "REQUEST_TIMEOUT_SECONDS must be greater than zero"
-        );
-        ensure!(
-            max_request_body_bytes > 0,
-            "MAX_REQUEST_BODY_BYTES must be greater than zero"
-        );
-        ensure!(
-            job_poll_interval_milliseconds > 0,
-            "JOB_POLL_INTERVAL_MILLISECONDS must be greater than zero"
-        );
-        ensure!(
-            job_lease_timeout_seconds > 0,
-            "JOB_LEASE_TIMEOUT_SECONDS must be greater than zero"
-        );
-        ensure!(
-            job_retry_base_seconds > 0,
-            "JOB_RETRY_BASE_SECONDS must be greater than zero"
-        );
-        ensure!(
             job_retry_max_seconds >= job_retry_base_seconds,
             "JOB_RETRY_MAX_SECONDS must be greater than or equal to JOB_RETRY_BASE_SECONDS"
-        );
-        ensure!(
-            job_max_attempts > 0,
-            "JOB_MAX_ATTEMPTS must be greater than zero"
-        );
-        ensure!(
-            job_completed_retention_seconds > 0,
-            "JOB_COMPLETED_RETENTION_SECONDS must be greater than zero"
-        );
-        ensure!(
-            job_dead_retention_seconds > 0,
-            "JOB_DEAD_RETENTION_SECONDS must be greater than zero"
-        );
-        ensure!(
-            job_cleanup_interval_seconds > 0,
-            "JOB_CLEANUP_INTERVAL_SECONDS must be greater than zero"
-        );
-        ensure!(
-            rate_limit_requests_per_minute > 0,
-            "RATE_LIMIT_REQUESTS_PER_MINUTE must be greater than zero"
-        );
-        ensure!(
-            rate_limit_burst > 0,
-            "RATE_LIMIT_BURST must be greater than zero"
         );
 
         Ok(Self {
@@ -197,33 +142,12 @@ impl OidcConfig {
             "OIDC_ALLOWED_ALGORITHMS must contain at least one algorithm"
         );
 
-        let http_timeout_seconds = parse_or("OIDC_HTTP_TIMEOUT_SECONDS", 5)?;
-        let clock_skew_seconds = parse_or("OIDC_CLOCK_SKEW_SECONDS", 30)?;
-        let jwks_refresh_interval_seconds = parse_or("OIDC_JWKS_REFRESH_INTERVAL_SECONDS", 60)?;
-        let jwks_max_age_seconds = parse_or("OIDC_JWKS_MAX_AGE_SECONDS", 300)?;
-        let max_token_lifetime_seconds = parse_or("OIDC_MAX_TOKEN_LIFETIME_SECONDS", 3_600)?;
+        let http_timeout_seconds = positive_or("OIDC_HTTP_TIMEOUT_SECONDS", 5)?;
+        let clock_skew_seconds = positive_or("OIDC_CLOCK_SKEW_SECONDS", 30)?;
+        let jwks_refresh_interval_seconds = positive_or("OIDC_JWKS_REFRESH_INTERVAL_SECONDS", 60)?;
+        let jwks_max_age_seconds = positive_or("OIDC_JWKS_MAX_AGE_SECONDS", 300)?;
+        let max_token_lifetime_seconds = positive_or("OIDC_MAX_TOKEN_LIFETIME_SECONDS", 3_600)?;
         let allow_insecure_http = parse_or("OIDC_ALLOW_INSECURE_HTTP", false)?;
-
-        ensure!(
-            http_timeout_seconds > 0,
-            "OIDC_HTTP_TIMEOUT_SECONDS must be greater than zero"
-        );
-        ensure!(
-            clock_skew_seconds > 0,
-            "OIDC_CLOCK_SKEW_SECONDS must be greater than zero"
-        );
-        ensure!(
-            jwks_refresh_interval_seconds > 0,
-            "OIDC_JWKS_REFRESH_INTERVAL_SECONDS must be greater than zero"
-        );
-        ensure!(
-            jwks_max_age_seconds > 0,
-            "OIDC_JWKS_MAX_AGE_SECONDS must be greater than zero"
-        );
-        ensure!(
-            max_token_lifetime_seconds > 0,
-            "OIDC_MAX_TOKEN_LIFETIME_SECONDS must be greater than zero"
-        );
 
         Ok(Self {
             issuer_url,
@@ -286,4 +210,15 @@ where
         Err(env::VarError::NotPresent) => Ok(default),
         Err(error) => Err(error).with_context(|| format!("could not read {name}")),
     }
+}
+
+/// Reads a numeric setting that must be strictly greater than zero.
+fn positive_or<T>(name: &str, default: T) -> Result<T>
+where
+    T: std::str::FromStr + PartialOrd + Default + Copy,
+    T::Err: std::error::Error + Send + Sync + 'static,
+{
+    let value = parse_or(name, default)?;
+    ensure!(value > T::default(), "{name} must be greater than zero");
+    Ok(value)
 }

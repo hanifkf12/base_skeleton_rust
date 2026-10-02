@@ -6,7 +6,7 @@ use std::{
 use axum::{
     Router,
     body::Body,
-    extract::DefaultBodyLimit,
+    extract::{DefaultBodyLimit, MatchedPath},
     http::{StatusCode, header},
     middleware::{self, Next},
     response::Response,
@@ -128,7 +128,11 @@ pub fn build_router(
 
 async fn record_http_metrics(request: axum::http::Request<Body>, next: Next) -> Response {
     let method = request.method().as_str().to_owned();
-    let route = normalized_route(request.uri().path());
+    // The router inserts `MatchedPath` before this layer runs, so the route
+    // label comes from the routing table rather than a hand-kept path list.
+    // Cloning is an `Arc` clone, and the clone must outlive the move below.
+    let matched = request.extensions().get::<MatchedPath>().cloned();
+    let route = matched.as_ref().map_or("unmatched", MatchedPath::as_str);
     crate::telemetry::http_request_started(&method, route);
     let started = Instant::now();
     let response = next.run(request).await;
@@ -142,27 +146,4 @@ async fn record_http_metrics(request: axum::http::Request<Body>, next: Next) -> 
         crate::telemetry::record_rate_limit_rejection(&method, route, response.status().as_u16());
     }
     response
-}
-
-fn normalized_route(path: &str) -> &'static str {
-    match path {
-        "/health" => "/health",
-        "/health/live" => "/health/live",
-        "/health/ready" => "/health/ready",
-        "/metrics" => "/metrics",
-        "/api/v1/users" => "/api/v1/users",
-        _ if path.starts_with("/api/v1/users/") => "/api/v1/users/{id}",
-        _ => "unmatched",
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::normalized_route;
-
-    #[test]
-    fn normalizes_dynamic_and_unknown_paths() {
-        assert_eq!(normalized_route("/api/v1/users/3f3e"), "/api/v1/users/{id}");
-        assert_eq!(normalized_route("/not-a-route?token=secret"), "unmatched");
-    }
 }

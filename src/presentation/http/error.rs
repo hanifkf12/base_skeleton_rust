@@ -18,12 +18,11 @@ pub struct ApiError {
 
 impl ApiError {
     pub fn invalid_id() -> Self {
-        Self {
-            status: StatusCode::BAD_REQUEST,
-            code: "invalid_user_id",
-            message: "user id must be a valid UUID".to_owned(),
-            www_authenticate: None,
-        }
+        Self::without_challenge(
+            StatusCode::BAD_REQUEST,
+            "invalid_user_id",
+            "user id must be a valid UUID".to_owned(),
+        )
     }
 
     pub fn unauthorized() -> Self {
@@ -78,9 +77,10 @@ impl ApiError {
         }
     }
 
-    fn invalid_request(code: &'static str, message: String) -> Self {
+    /// An error that carries no `WWW-Authenticate` challenge.
+    fn without_challenge(status: StatusCode, code: &'static str, message: String) -> Self {
         Self {
-            status: StatusCode::BAD_REQUEST,
+            status,
             code,
             message,
             www_authenticate: None,
@@ -90,50 +90,30 @@ impl ApiError {
 
 impl From<JsonRejection> for ApiError {
     fn from(error: JsonRejection) -> Self {
-        Self::invalid_request("invalid_json", error.body_text())
+        Self::without_challenge(StatusCode::BAD_REQUEST, "invalid_json", error.body_text())
     }
 }
 
 impl From<QueryRejection> for ApiError {
     fn from(error: QueryRejection) -> Self {
-        Self::invalid_request("invalid_query", error.body_text())
+        Self::without_challenge(StatusCode::BAD_REQUEST, "invalid_query", error.body_text())
     }
 }
 
 impl From<ApplicationError> for ApiError {
     fn from(error: ApplicationError) -> Self {
-        match error {
-            ApplicationError::InvalidInput(error) => Self {
-                status: StatusCode::UNPROCESSABLE_ENTITY,
-                code: "validation_failed",
-                message: error.to_string(),
-                www_authenticate: None,
-            },
-            ApplicationError::NotFound => Self {
-                status: StatusCode::NOT_FOUND,
-                code: "user_not_found",
-                message: error.to_string(),
-                www_authenticate: None,
-            },
-            ApplicationError::EmailAlreadyExists => Self {
-                status: StatusCode::CONFLICT,
-                code: "email_already_exists",
-                message: error.to_string(),
-                www_authenticate: None,
-            },
-            ApplicationError::Conflict => Self {
-                status: StatusCode::CONFLICT,
-                code: "conflict",
-                message: error.to_string(),
-                www_authenticate: None,
-            },
-            ApplicationError::DependencyUnavailable => Self {
-                status: StatusCode::SERVICE_UNAVAILABLE,
-                code: "service_unavailable",
-                message: error.to_string(),
-                www_authenticate: None,
-            },
-        }
+        let (status, code) = match &error {
+            ApplicationError::InvalidInput(_) => {
+                (StatusCode::UNPROCESSABLE_ENTITY, "validation_failed")
+            }
+            ApplicationError::NotFound => (StatusCode::NOT_FOUND, "user_not_found"),
+            ApplicationError::EmailAlreadyExists => (StatusCode::CONFLICT, "email_already_exists"),
+            ApplicationError::Conflict => (StatusCode::CONFLICT, "conflict"),
+            ApplicationError::DependencyUnavailable => {
+                (StatusCode::SERVICE_UNAVAILABLE, "service_unavailable")
+            }
+        };
+        Self::without_challenge(status, code, error.to_string())
     }
 }
 

@@ -27,16 +27,21 @@ pub struct UserCreationJob {
     pub max_attempts: u32,
 }
 
-/// Errors that can be produced by the user cache.
-/// * **Unavailable** – the cache backend (e.g. Redis) failed.
-/// * **Serialization** – (de)serialization of a cached value failed.
+/// Errors produced by the user cache. No caller branches on the cause: every
+/// cache failure is logged and the request continues, so the error stays
+/// opaque. Split it into variants only when a caller acts on the difference.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum CacheError {
-    #[error("cache unavailable: {0}")]
-    Unavailable(String),
+#[error("cache error: {message}")]
+pub struct CacheError {
+    message: String,
+}
 
-    #[error("cache serialization error: {0}")]
-    Serialization(String),
+impl CacheError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
 }
 
 #[async_trait]

@@ -50,9 +50,8 @@ impl TryFrom<CachedUser> for User {
     fn try_from(value: CachedUser) -> Result<Self, Self::Error> {
         Ok(User::restore(
             UserId::from_uuid(value.id),
-            Email::parse(value.email).map_err(|e| CacheError::Unavailable(e.to_string()))?,
-            DisplayName::parse(value.display_name)
-                .map_err(|e| CacheError::Unavailable(e.to_string()))?,
+            Email::parse(value.email).map_err(|e| CacheError::new(e.to_string()))?,
+            DisplayName::parse(value.display_name).map_err(|e| CacheError::new(e.to_string()))?,
             value.created_at,
             value.updated_at,
         ))
@@ -100,13 +99,13 @@ impl UserCache for RedisUserCache {
 impl From<redis::RedisError> for CacheError {
     fn from(error: redis::RedisError) -> Self {
         tracing::warn!(error = ?error, "Redis user cache operation failed");
-        CacheError::Unavailable(error.to_string())
+        CacheError::new(error.to_string())
     }
 }
 
 impl From<serde_json::Error> for CacheError {
     fn from(error: serde_json::Error) -> Self {
         tracing::warn!(error = ?error, "Redis user cache serialization failed");
-        CacheError::Serialization(error.to_string())
+        CacheError::new(error.to_string())
     }
 }

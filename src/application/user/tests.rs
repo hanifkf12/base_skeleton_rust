@@ -336,7 +336,7 @@ impl UserCache for FailingSetCache {
     }
 
     async fn set(&self, _user: &User, _ttl_seconds: u64) -> Result<(), CacheError> {
-        Err(CacheError::Unavailable("simulated set failure".into()))
+        Err(CacheError::new("simulated set failure"))
     }
 
     async fn delete(&self, id: UserId) -> Result<(), CacheError> {
