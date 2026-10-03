@@ -39,16 +39,27 @@ pub trait JobQueue: Send + Sync {
         lease_timeout: Duration,
     ) -> Result<Option<ClaimedJob>, JobQueueError>;
 
-    async fn complete(&self, job_id: Uuid, worker_id: &str) -> Result<(), JobQueueError>;
+    async fn complete(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+        attempt: u32,
+    ) -> Result<(), JobQueueError>;
+
+    async fn renew(&self, job_id: Uuid, worker_id: &str, attempt: u32)
+    -> Result<(), JobQueueError>;
 
     async fn fail(
         &self,
         job_id: Uuid,
         worker_id: &str,
+        attempt: u32,
         error: &str,
         retry_delay: Duration,
     ) -> Result<JobDisposition, JobQueueError>;
 
+    /// Delete at most 1,000 eligible terminal jobs per call. Workers may call
+    /// repeatedly within a finite maintenance cycle to drain larger backlogs.
     async fn purge_terminal(
         &self,
         completed_older_than: Duration,
@@ -57,6 +68,9 @@ pub trait JobQueue: Send + Sync {
 }
 
 #[async_trait]
+/// Jobs are delivered at least once. Implementations must make external side effects
+/// idempotent: lease loss cancels the handler future, but cannot undo effects already
+/// committed (or work spawned independently of that future).
 pub trait JobHandler: Send + Sync {
     fn job_type(&self) -> &'static str;
     async fn handle(&self, job: &ClaimedJob) -> Result<(), JobHandlerError>;

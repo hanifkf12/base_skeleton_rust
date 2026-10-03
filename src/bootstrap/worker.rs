@@ -6,7 +6,7 @@ use tokio::sync::watch;
 use uuid::Uuid;
 
 use crate::{
-    application::job::{JobHandler, JobQueue, JobWorker, RunOutcome},
+    application::job::{JobHandler, JobQueue, JobWorker, JobWorkerConfig, RunOutcome},
     config::Config,
     infrastructure::{database::postgres::PostgresJobQueue, job::UserCreatedHandler},
     telemetry::OpenTelemetryJobTracer,
@@ -33,12 +33,14 @@ pub async fn run(config: Config, mut shutdown_receiver: watch::Receiver<bool>) -
         queue,
         handlers,
         tracer,
-        worker_id.clone(),
-        Duration::from_secs(config.job_lease_timeout_seconds),
-        Duration::from_secs(config.job_retry_base_seconds),
-        Duration::from_secs(config.job_retry_max_seconds),
-        Duration::from_secs(config.job_completed_retention_seconds),
-        Duration::from_secs(config.job_dead_retention_seconds),
+        JobWorkerConfig {
+            worker_id: worker_id.clone(),
+            lease_timeout: Duration::from_secs(config.job_lease_timeout_seconds),
+            retry_base: Duration::from_secs(config.job_retry_base_seconds),
+            retry_max: Duration::from_secs(config.job_retry_max_seconds),
+            completed_retention: Duration::from_secs(config.job_completed_retention_seconds),
+            dead_retention: Duration::from_secs(config.job_dead_retention_seconds),
+        },
     );
     let mut next_cleanup = tokio::time::Instant::now();
 
@@ -50,31 +52,18 @@ pub async fn run(config: Config, mut shutdown_receiver: watch::Receiver<bool>) -
         }
 
         if tokio::time::Instant::now() >= next_cleanup {
-            match worker.run_maintenance().await {
-                Ok(purged) if purged > 0 => {
-                    crate::telemetry::record_cleanup_count(purged);
-                    tracing::info!(purged_jobs = purged, "purged terminal jobs");
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    crate::telemetry::record_worker_error("cleanup");
-                    tracing::error!(%error, "job cleanup failed");
-                }
+            // Cleanup can stop between batches; an active handler below still
+            // finishes before shutdown is observed.
+            tokio::select! {
+                _ = shutdown::wait(&mut shutdown_receiver) => break,
+                _ = cleanup(&worker) => {}
             }
             next_cleanup = tokio::time::Instant::now() + cleanup_interval;
         }
 
         // Finish an active job before observing shutdown. Handlers still need
         // idempotency because at-least-once delivery permits crash recovery.
-        let should_pause = match worker.run_once().await {
-            Ok(RunOutcome::Idle) => true,
-            Ok(_) => false,
-            Err(error) => {
-                crate::telemetry::record_worker_error("iteration");
-                tracing::error!(%error, "job worker iteration failed");
-                true
-            }
-        };
+        let should_pause = iteration(&worker).await;
 
         if should_pause && shutdown::wait_or_timeout(&mut shutdown_receiver, poll_interval).await {
             break;
@@ -83,4 +72,30 @@ pub async fn run(config: Config, mut shutdown_receiver: watch::Receiver<bool>) -
 
     tracing::info!(%worker_id, "PostgreSQL job worker stopped");
     Ok(())
+}
+
+async fn cleanup(worker: &JobWorker) {
+    match worker.run_maintenance().await {
+        Ok(purged) if purged > 0 => {
+            crate::telemetry::record_cleanup_count(purged);
+            tracing::info!(purged_jobs = purged, "purged terminal jobs");
+        }
+        Ok(_) => {}
+        Err(error) => {
+            crate::telemetry::record_worker_error("cleanup");
+            tracing::error!(%error, "job cleanup failed");
+        }
+    }
+}
+
+async fn iteration(worker: &JobWorker) -> bool {
+    match worker.run_once().await {
+        Ok(RunOutcome::Idle) => true,
+        Ok(_) => false,
+        Err(error) => {
+            crate::telemetry::record_worker_error("iteration");
+            tracing::error!(%error, "job worker iteration failed");
+            true
+        }
+    }
 }

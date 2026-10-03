@@ -149,7 +149,7 @@ impl OidcConfig {
         let max_token_lifetime_seconds = positive_or("OIDC_MAX_TOKEN_LIFETIME_SECONDS", 3_600)?;
         let allow_insecure_http = parse_or("OIDC_ALLOW_INSECURE_HTTP", false)?;
 
-        Ok(Self {
+        let config = Self {
             issuer_url,
             audience,
             allowed_algorithms,
@@ -159,7 +159,25 @@ impl OidcConfig {
             jwks_max_age_seconds,
             max_token_lifetime_seconds,
             allow_insecure_http,
-        })
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.jwks_refresh_interval_seconds > 0,
+            "OIDC_JWKS_REFRESH_INTERVAL_SECONDS must be greater than zero"
+        );
+        ensure!(
+            self.jwks_max_age_seconds > 0,
+            "OIDC_JWKS_MAX_AGE_SECONDS must be greater than zero"
+        );
+        ensure!(
+            self.jwks_max_age_seconds >= self.jwks_refresh_interval_seconds,
+            "OIDC_JWKS_MAX_AGE_SECONDS must be greater than or equal to OIDC_JWKS_REFRESH_INTERVAL_SECONDS"
+        );
+        Ok(())
     }
 }
 
@@ -221,4 +239,44 @@ where
     let value = parse_or(name, default)?;
     ensure!(value > T::default(), "{name} must be greater than zero");
     Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OidcConfig;
+
+    fn oidc_config(refresh_interval: u64, max_age: u64) -> OidcConfig {
+        OidcConfig {
+            issuer_url: "https://issuer.example".to_owned(),
+            audience: "users-api".to_owned(),
+            allowed_algorithms: vec!["RS256".to_owned()],
+            http_timeout_seconds: 5,
+            clock_skew_seconds: 30,
+            jwks_refresh_interval_seconds: refresh_interval,
+            jwks_max_age_seconds: max_age,
+            max_token_lifetime_seconds: 3_600,
+            allow_insecure_http: false,
+        }
+    }
+
+    #[test]
+    fn rejects_jwks_max_age_shorter_than_refresh_interval() {
+        assert!(oidc_config(60, 59).validate().is_err());
+    }
+
+    #[test]
+    fn accepts_equal_jwks_max_age_and_refresh_interval() {
+        assert!(oidc_config(60, 60).validate().is_ok());
+    }
+
+    #[test]
+    fn accepts_jwks_max_age_longer_than_refresh_interval() {
+        assert!(oidc_config(60, 300).validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_zero_jwks_timers() {
+        assert!(oidc_config(0, 300).validate().is_err());
+        assert!(oidc_config(60, 0).validate().is_err());
+    }
 }

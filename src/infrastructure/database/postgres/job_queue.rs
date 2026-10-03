@@ -83,7 +83,15 @@ impl JobQueue for PostgresJobQueue {
         // Requeue abandoned work. A job whose attempt budget was exhausted is
         // dead-lettered instead, so it cannot remain in `running` forever.
         sqlx::query(
-            r#"UPDATE background_jobs
+            r#"WITH expired AS (
+                   SELECT id FROM background_jobs
+                   WHERE status = 'running'
+                     AND locked_at < NOW() - ($1 * INTERVAL '1 second')
+                   ORDER BY locked_at, id
+                   FOR UPDATE SKIP LOCKED
+                   LIMIT 1000
+               )
+               UPDATE background_jobs AS jobs
                SET status = CASE
                        WHEN attempts >= max_attempts THEN 'dead'
                        ELSE 'pending'
@@ -93,8 +101,8 @@ impl JobQueue for PostgresJobQueue {
                    locked_by = NULL,
                    last_error = 'worker lease expired',
                    updated_at = NOW()
-               WHERE status = 'running'
-                 AND locked_at < NOW() - ($1 * INTERVAL '1 second')"#,
+               FROM expired
+               WHERE jobs.id = expired.id"#,
         )
         .bind(lease_seconds)
         .execute(&mut *transaction)
@@ -130,7 +138,12 @@ impl JobQueue for PostgresJobQueue {
         claimed.map(ClaimedJobRow::into_application).transpose()
     }
 
-    async fn complete(&self, job_id: Uuid, worker_id: &str) -> Result<(), JobQueueError> {
+    async fn complete(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+        attempt: u32,
+    ) -> Result<(), JobQueueError> {
         let result = sqlx::query(
             r#"UPDATE background_jobs
                SET status = 'completed',
@@ -138,13 +151,35 @@ impl JobQueue for PostgresJobQueue {
                    locked_by = NULL,
                    completed_at = NOW(),
                    updated_at = NOW()
-               WHERE id = $1 AND status = 'running' AND locked_by = $2"#,
+               WHERE id = $1 AND status = 'running' AND locked_by = $2
+                 AND attempts = $3"#,
         )
         .bind(job_id)
         .bind(worker_id)
+        .bind(i64::from(attempt))
         .execute(&self.pool)
         .await?;
 
+        ensure_lease(result.rows_affected())
+    }
+
+    async fn renew(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+        attempt: u32,
+    ) -> Result<(), JobQueueError> {
+        let result = sqlx::query(
+            r#"UPDATE background_jobs
+               SET locked_at = NOW(), updated_at = NOW()
+               WHERE id = $1 AND status = 'running' AND locked_by = $2
+                 AND attempts = $3"#,
+        )
+        .bind(job_id)
+        .bind(worker_id)
+        .bind(i64::from(attempt))
+        .execute(&self.pool)
+        .await?;
         ensure_lease(result.rows_affected())
     }
 
@@ -152,6 +187,7 @@ impl JobQueue for PostgresJobQueue {
         &self,
         job_id: Uuid,
         worker_id: &str,
+        attempt: u32,
         error: &str,
         retry_delay: Duration,
     ) -> Result<JobDisposition, JobQueueError> {
@@ -165,17 +201,19 @@ impl JobQueue for PostgresJobQueue {
                    END,
                    available_at = CASE
                        WHEN attempts >= max_attempts THEN available_at
-                       ELSE NOW() + ($3 * INTERVAL '1 second')
+                       ELSE NOW() + ($4 * INTERVAL '1 second')
                    END,
                    locked_at = NULL,
                    locked_by = NULL,
-                   last_error = $4,
+                   last_error = $5,
                    updated_at = NOW()
                WHERE id = $1 AND status = 'running' AND locked_by = $2
+                 AND attempts = $3
                RETURNING status"#,
         )
         .bind(job_id)
         .bind(worker_id)
+        .bind(i64::from(attempt))
         .bind(retry_seconds)
         .bind(error)
         .fetch_optional(&self.pool)
@@ -200,16 +238,18 @@ impl JobQueue for PostgresJobQueue {
         let completed_retention_seconds = duration_seconds(completed_older_than);
         let dead_retention_seconds = duration_seconds(dead_older_than);
         let result = sqlx::query(
-            r#"DELETE FROM background_jobs
-               WHERE id IN (
+            r#"WITH expired AS (
                    SELECT id FROM background_jobs
                    WHERE (status = 'completed'
                           AND completed_at < NOW() - ($1 * INTERVAL '1 second'))
                       OR (status = 'dead'
                           AND updated_at < NOW() - ($2 * INTERVAL '1 second'))
-                   ORDER BY updated_at
+                   ORDER BY updated_at, id
+                   FOR UPDATE SKIP LOCKED
                    LIMIT 1000
-               )"#,
+               )
+               DELETE FROM background_jobs AS jobs
+               USING expired WHERE jobs.id = expired.id"#,
         )
         .bind(completed_retention_seconds)
         .bind(dead_retention_seconds)
@@ -230,8 +270,8 @@ fn max_attempts(value: u32) -> Result<i32, JobQueueError> {
     })
 }
 
-fn duration_seconds(duration: Duration) -> i64 {
-    i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
+fn duration_seconds(duration: Duration) -> f64 {
+    duration.as_secs_f64()
 }
 
 fn ensure_lease(rows_affected: u64) -> Result<(), JobQueueError> {

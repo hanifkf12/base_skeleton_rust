@@ -245,7 +245,7 @@ When adding an HTTP endpoint:
 
 1. Put it in the read or write router with an explicit scope.
 2. Keep it under `/api/*` unless it is genuinely an operational endpoint.
-3. Add a normalized route template to `normalized_route`.
+3. HTTP metrics automatically use the route's Axum `MatchedPath` template; no separate path list needs updating.
 4. Preserve the standard JSON error envelope.
 5. Add HTTP tests for credentials, scope, input, success, and mapped failure.
 
@@ -261,6 +261,8 @@ JWKS caching uses two different controls:
 - `OIDC_JWKS_REFRESH_INTERVAL_SECONDS` throttles refresh and retry attempts.
 
 An unknown `kid` or stale cache may trigger refresh. Refresh is single-flight inside a process. Once cached keys are stale, refresh failure must return `authentication_unavailable`; do not fall back to stale keys indefinitely.
+
+The maximum JWKS age must be at least the refresh interval; configuration loading and discovery reject shorter maximum ages. Discovery/JWKS responses are capped at 1 MiB even when chunked. HTTPS-only transport also constrains redirects unless local insecure HTTP is enabled. Selected signing keys are decoded when a key set is loaded and indexed by `(kid, algorithm)` for allocation-free key lookup; malformed selected key material rejects the load.
 
 ### Client IP and rate limiting
 
@@ -908,7 +910,7 @@ pending ──claim──→ running ─────────────→ 
 
 `attempts` increments when a worker claims a job. A failure schedules the next `available_at` using exponential backoff. After `max_attempts`, the job moves to `dead` and is no longer claimed automatically.
 
-If a process crashes while a job is `running`, another claim operation detects the expired `locked_at` lease. It returns the job to `pending`, or moves it to `dead` if no attempts remain.
+If a process crashes while a job is `running`, another claim operation detects the expired `locked_at` lease. It recovers at most 1,000 expired rows per transaction using `FOR UPDATE SKIP LOCKED`, returning each to `pending` or moving it to `dead` if no attempts remain.
 
 ### Concurrent claiming
 
@@ -920,7 +922,7 @@ FOR UPDATE SKIP LOCKED
 
 It updates and returns the selected row in the same transaction. Competing workers skip a row already locked by another worker instead of waiting for it. You can safely run multiple worker processes against the same table.
 
-The completion and failure updates include both `job_id` and `locked_by`. A stale worker cannot change a job after its lease has been taken over.
+Renewal, completion, and failure updates require `job_id`, `locked_by`, and the claimed `attempts` value. A stale attempt cannot change a job after it is reclaimed, even if the new process uses the same worker ID. Keep attempt numbers monotonic when manually retrying dead jobs: increase `max_attempts` rather than resetting `attempts`.
 
 ### Atomic user creation and job publication
 
@@ -992,7 +994,7 @@ When `JOB_WORKER_ID` is omitted, the process generates a UUID-based ID.
 | `JOB_DEAD_RETENTION_SECONDS` | `2592000` | Age after which dead jobs become cleanup candidates |
 | `JOB_CLEANUP_INTERVAL_SECONDS` | `3600` | Interval between periodic maintenance passes |
 
-Set the lease timeout longer than the normal maximum handler duration. The current implementation uses a fixed lease and does not send heartbeats during a long handler. If jobs legitimately run longer than the lease, split them into shorter jobs or add a lease-renewal operation before lowering the timeout.
+The worker renews an active handler's lease approximately every third of `JOB_LEASE_TIMEOUT_SECONDS`. Claim/renewal start times conservatively bound ownership, and renewal and terminal database writes cannot wait past that budget. Renewal failure cancels the handler future without a stale terminal write. Handlers must remain cooperative async operations and idempotent; cancellation cannot undo committed or independently spawned side effects. `JobWorkerConfig` groups the worker ID, lease, retry, and retention settings, while bootstrap keeps cleanup scheduling and iteration handling separate.
 
 ### Adding a new job type
 
@@ -1113,7 +1115,7 @@ After fixing the underlying cause, retry one dead job by resetting its attempt b
 ```sql
 UPDATE background_jobs
 SET status = 'pending',
-    attempts = 0,
+    max_attempts = attempts + 5,
     available_at = NOW(),
     last_error = NULL,
     updated_at = NOW()
@@ -1131,7 +1133,7 @@ Add monitoring for:
 - Handler duration relative to lease timeout.
 - PostgreSQL connection-pool saturation.
 
-The worker runs maintenance immediately at startup and every `JOB_CLEANUP_INTERVAL_SECONDS`, independent of whether any job succeeds. One pass deletes at most 1,000 terminal rows: completed jobs older than `JOB_COMPLETED_RETENTION_SECONDS` and dead jobs older than `JOB_DEAD_RETENTION_SECONDS`. Pending and running jobs are never retention-cleaned. Dead-job deletion is permanent, so export or archive records before retention expires when audit policy requires it.
+The worker runs maintenance immediately at startup and every `JOB_CLEANUP_INTERVAL_SECONDS`, independent of whether any job succeeds. Each statement deletes at most 1,000 eligible terminal rows with `FOR UPDATE SKIP LOCKED`; a cycle processes at most 16 batches (16,000 rows), yielding between batches and remaining cancellable on shutdown. Completed jobs use `JOB_COMPLETED_RETENTION_SECONDS` and dead jobs use `JOB_DEAD_RETENTION_SECONDS`. Pending and running jobs are never retention-cleaned. Larger backlogs require subsequent cycles or a shorter cleanup interval. Dead-job deletion is permanent, so export or archive records before retention expires when audit policy requires it.
 
 ### When to move beyond PostgreSQL
 

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     str::FromStr,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -27,11 +27,10 @@ impl From<jsonwebtoken::errors::Error> for AccessTokenVerificationError {
     }
 }
 
-impl From<reqwest::Error> for AccessTokenVerificationError {
-    fn from(_: reqwest::Error) -> Self {
-        AccessTokenVerificationError::AuthenticationUnavailable
-    }
-}
+// Discovery and JWKS documents are each limited to 1 MiB, including chunked responses.
+const MAX_METADATA_RESPONSE_BYTES: usize = 1_048_576;
+
+type KeyIndex = HashMap<Algorithm, HashMap<String, Arc<DecodingKey>>>;
 
 #[derive(Deserialize)]
 struct DiscoveryMetadata {
@@ -52,7 +51,7 @@ pub struct OidcAccessTokenVerifier {
     client: reqwest::Client,
     issuer: String,
     audience: String,
-    allowed_algorithms: Vec<Algorithm>,
+    allowed_algorithms: HashSet<Algorithm>,
     jwks_uri: String,
     keys: RwLock<CachedKeys>,
     refresh: Mutex<RefreshState>,
@@ -63,8 +62,14 @@ pub struct OidcAccessTokenVerifier {
 }
 
 struct CachedKeys {
-    set: JwkSet,
+    index: KeyIndex,
     fetched_at: Instant,
+}
+
+impl CachedKeys {
+    fn key(&self, kid: &str, algorithm: Algorithm) -> Option<Arc<DecodingKey>> {
+        self.index.get(&algorithm)?.get(kid).cloned()
+    }
 }
 
 #[derive(Default)]
@@ -74,10 +79,8 @@ struct RefreshState {
 
 impl OidcAccessTokenVerifier {
     pub async fn discover(config: &OidcConfig) -> Result<Arc<Self>> {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(config.http_timeout_seconds))
-            .build()
-            .context("could not construct OIDC HTTP client")?;
+        config.validate()?;
+        let client = metadata_client(config)?;
         let allowed_algorithms = parse_algorithms(&config.allowed_algorithms)?;
         validate_issuer_url(
             &config.issuer_url,
@@ -112,7 +115,7 @@ impl OidcAccessTokenVerifier {
         let keys: JwkSet = fetch_json(&client, &metadata.jwks_uri)
             .await
             .context("could not load initial OIDC JWKS")?;
-        ensure_usable_keys(&keys, &allowed_algorithms)?;
+        let index = index_keys(&keys, &allowed_algorithms)?;
 
         Ok(Arc::new(Self {
             client,
@@ -121,7 +124,7 @@ impl OidcAccessTokenVerifier {
             allowed_algorithms,
             jwks_uri: metadata.jwks_uri,
             keys: RwLock::new(CachedKeys {
-                set: keys,
+                index,
                 fetched_at: Instant::now(),
             }),
             refresh: Mutex::new(RefreshState::default()),
@@ -136,11 +139,11 @@ impl OidcAccessTokenVerifier {
         &self,
         kid: &str,
         algorithm: Algorithm,
-    ) -> Result<Jwk, AccessTokenVerificationError> {
+    ) -> Result<Arc<DecodingKey>, AccessTokenVerificationError> {
         {
             let keys = self.keys.read().await;
             if keys.fetched_at.elapsed() < self.jwks_max_age
-                && let Some(key) = find_key(&keys.set, kid, algorithm)
+                && let Some(key) = keys.key(kid, algorithm)
             {
                 return Ok(key);
             }
@@ -150,7 +153,7 @@ impl OidcAccessTokenVerifier {
         {
             let keys = self.keys.read().await;
             if keys.fetched_at.elapsed() < self.jwks_max_age
-                && let Some(key) = find_key(&keys.set, kid, algorithm)
+                && let Some(key) = keys.key(kid, algorithm)
             {
                 return Ok(key);
             }
@@ -169,20 +172,26 @@ impl OidcAccessTokenVerifier {
 
         refresh.last_attempt = Some(Instant::now());
         let keys = match fetch_json::<JwkSet>(&self.client, &self.jwks_uri).await {
-            Ok(keys) if ensure_usable_keys(&keys, &self.allowed_algorithms).is_ok() => keys,
-            Ok(_) => {
-                tracing::error!("OIDC JWKS refresh returned no usable signing keys");
-                return Err(AccessTokenVerificationError::AuthenticationUnavailable);
-            }
+            Ok(keys) => keys,
             Err(error) => {
                 tracing::error!(error = %error, "OIDC JWKS refresh failed");
                 return Err(AccessTokenVerificationError::AuthenticationUnavailable);
             }
         };
+        let index = match index_keys(&keys, &self.allowed_algorithms) {
+            Ok(index) => index,
+            Err(error) => {
+                tracing::error!(error = %error, "OIDC JWKS refresh contains invalid signing keys");
+                return Err(AccessTokenVerificationError::AuthenticationUnavailable);
+            }
+        };
 
-        let key = find_key(&keys, kid, algorithm);
+        let key = index
+            .get(&algorithm)
+            .and_then(|keys| keys.get(kid))
+            .cloned();
         *self.keys.write().await = CachedKeys {
-            set: keys,
+            index,
             fetched_at: Instant::now(),
         };
         key.ok_or(AccessTokenVerificationError::InvalidToken)
@@ -204,9 +213,7 @@ impl AccessTokenVerifier for OidcAccessTokenVerifier {
             .as_deref()
             .filter(|kid| !kid.is_empty())
             .ok_or(AccessTokenVerificationError::InvalidToken)?;
-        let jwk = self.key_for(kid, header.alg).await?;
-        let decoding_key =
-            DecodingKey::from_jwk(&jwk).map_err(AccessTokenVerificationError::from)?;
+        let decoding_key = self.key_for(kid, header.alg).await?;
 
         let mut validation = Validation::new(header.alg);
         validation.leeway = self.clock_skew_seconds;
@@ -241,17 +248,47 @@ impl AccessTokenVerifier for OidcAccessTokenVerifier {
     }
 }
 
-async fn fetch_json<T>(client: &reqwest::Client, url: &str) -> reqwest::Result<T>
+fn metadata_client(config: &OidcConfig) -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .https_only(!config.allow_insecure_http)
+        .timeout(Duration::from_secs(config.http_timeout_seconds))
+        .build()
+        .context("could not construct OIDC HTTP client")
+}
+
+async fn fetch_json<T>(client: &reqwest::Client, url: &str) -> Result<T>
 where
     T: serde::de::DeserializeOwned,
 {
-    client
+    let mut response = client
         .get(url)
         .send()
-        .await?
-        .error_for_status()?
-        .json()
         .await
+        .map_err(|_| anyhow::anyhow!("OIDC metadata request failed"))?
+        .error_for_status()
+        .map_err(|_| anyhow::anyhow!("OIDC metadata request returned an unsuccessful status"))?;
+    let content_length = response.content_length();
+    ensure!(
+        content_length.is_none_or(|length| length <= MAX_METADATA_RESPONSE_BYTES as u64),
+        "OIDC metadata response exceeds the 1 MiB limit"
+    );
+    let capacity = content_length
+        .map(|length| length as usize)
+        .unwrap_or(8_192);
+    let mut bytes = Vec::with_capacity(capacity);
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| anyhow::anyhow!("could not read OIDC metadata response"))?
+    {
+        ensure!(
+            chunk.len() <= MAX_METADATA_RESPONSE_BYTES - bytes.len(),
+            "OIDC metadata response exceeds the 1 MiB limit"
+        );
+        bytes.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&bytes)
+        .map_err(|_| anyhow::anyhow!("OIDC metadata response contains invalid JSON"))
 }
 
 fn validate_issuer_url(value: &str, allow_insecure_http: bool, field: &str) -> Result<()> {
@@ -278,8 +315,8 @@ fn parse_url(value: &str, field: &str) -> Result<reqwest::Url> {
     reqwest::Url::parse(value).with_context(|| format!("{field} must be a valid URL"))
 }
 
-fn parse_algorithms(values: &[String]) -> Result<Vec<Algorithm>> {
-    let mut algorithms = Vec::with_capacity(values.len());
+fn parse_algorithms(values: &[String]) -> Result<HashSet<Algorithm>> {
+    let mut algorithms = HashSet::with_capacity(values.len());
     for value in values {
         let algorithm = Algorithm::from_str(value).with_context(|| {
             format!("OIDC_ALLOWED_ALGORITHMS contains unsupported value {value}")
@@ -290,9 +327,7 @@ fn parse_algorithms(values: &[String]) -> Result<Vec<Algorithm>> {
         ) {
             bail!("OIDC_ALLOWED_ALGORITHMS cannot enable symmetric HMAC algorithms");
         }
-        if !algorithms.contains(&algorithm) {
-            algorithms.push(algorithm);
-        }
+        algorithms.insert(algorithm);
     }
     ensure!(
         !algorithms.is_empty(),
@@ -301,27 +336,45 @@ fn parse_algorithms(values: &[String]) -> Result<Vec<Algorithm>> {
     Ok(algorithms)
 }
 
-fn ensure_usable_keys(keys: &JwkSet, allowed_algorithms: &[Algorithm]) -> Result<()> {
+fn index_keys(keys: &JwkSet, allowed_algorithms: &HashSet<Algorithm>) -> Result<KeyIndex> {
+    let mut index = KeyIndex::new();
+    for key in &keys.keys {
+        let Some(kid) = key.common.key_id.as_deref().filter(|kid| !kid.is_empty()) else {
+            continue;
+        };
+        let mut decoding_key = None;
+        for &algorithm in allowed_algorithms {
+            if !key_is_usable(key, algorithm) {
+                continue;
+            }
+            // Preserve first-match lookup semantics, including shadowed duplicates.
+            if index
+                .get(&algorithm)
+                .is_some_and(|keys| keys.contains_key(kid))
+            {
+                continue;
+            }
+            let decoded = match &decoding_key {
+                Some(decoded) => Arc::clone(decoded),
+                None => {
+                    let decoded = Arc::new(DecodingKey::from_jwk(key).map_err(|_| {
+                        anyhow::anyhow!("OIDC JWKS contains an invalid signing key")
+                    })?);
+                    decoding_key = Some(Arc::clone(&decoded));
+                    decoded
+                }
+            };
+            index
+                .entry(algorithm)
+                .or_default()
+                .insert(kid.to_owned(), decoded);
+        }
+    }
     ensure!(
-        keys.keys.iter().any(|key| {
-            key.common
-                .key_id
-                .as_deref()
-                .is_some_and(|kid| !kid.is_empty())
-                && allowed_algorithms
-                    .iter()
-                    .any(|algorithm| key_is_usable(key, *algorithm))
-        }),
+        !index.is_empty(),
         "OIDC JWKS contains no usable signing key"
     );
-    Ok(())
-}
-
-fn find_key(keys: &JwkSet, kid: &str, algorithm: Algorithm) -> Option<Jwk> {
-    keys.keys
-        .iter()
-        .find(|key| key.common.key_id.as_deref() == Some(kid) && key_is_usable(key, algorithm))
-        .cloned()
+    Ok(index)
 }
 
 fn key_is_usable(key: &Jwk, algorithm: Algorithm) -> bool {
@@ -371,7 +424,14 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use axum::{Json, Router, extract::State, routing::get};
+    use axum::{
+        Json, Router,
+        body::Body,
+        extract::State,
+        http::{Response, header},
+        response::IntoResponse,
+        routing::get,
+    };
     use jsonwebtoken::{EncodingKey, Header, encode};
     use serde_json::{Value, json};
     use tokio::{net::TcpListener, sync::RwLock, task::JoinHandle};
@@ -386,12 +446,42 @@ mod tests {
         issuer: String,
         jwks: Arc<RwLock<Value>>,
         jwks_requests: Arc<AtomicUsize>,
+        discovery_body: Arc<RwLock<Option<MetadataBody>>>,
+        jwks_body: Arc<RwLock<Option<MetadataBody>>>,
     }
 
     struct TestProvider {
         config: OidcConfig,
         state: ProviderState,
         task: JoinHandle<()>,
+    }
+
+    #[derive(Clone, Copy)]
+    enum MetadataBody {
+        OversizedDeclared,
+        OversizedChunked,
+        InvalidJson,
+    }
+
+    impl MetadataBody {
+        fn response(self, mut document: Value) -> Response<Body> {
+            if matches!(self, Self::InvalidJson) {
+                return Response::new(Body::from("{invalid-json"));
+            }
+            // Without the response bound, this remains valid provider metadata.
+            document["padding"] = json!(" ".repeat(MAX_METADATA_RESPONSE_BYTES));
+            let bytes = serde_json::to_vec(&document).unwrap();
+            let mut response = Response::builder().header(header::CONTENT_TYPE, "application/json");
+            let body = match self {
+                Self::OversizedDeclared => {
+                    response = response.header(header::CONTENT_LENGTH, bytes.len());
+                    Body::from(bytes)
+                }
+                Self::OversizedChunked => Body::from_stream(Body::from(bytes).into_data_stream()),
+                Self::InvalidJson => unreachable!(),
+            };
+            response.body(body).unwrap()
+        }
     }
 
     impl TestProvider {
@@ -402,6 +492,8 @@ mod tests {
                 issuer: issuer.clone(),
                 jwks: Arc::new(RwLock::new(jwks(kid))),
                 jwks_requests: Arc::new(AtomicUsize::new(0)),
+                discovery_body: Arc::new(RwLock::new(None)),
+                jwks_body: Arc::new(RwLock::new(None)),
             };
             let app = Router::new()
                 .route("/.well-known/openid-configuration", get(discovery))
@@ -432,16 +524,24 @@ mod tests {
         }
     }
 
-    async fn discovery(State(state): State<ProviderState>) -> Json<Value> {
-        Json(json!({
+    async fn discovery(State(state): State<ProviderState>) -> Response<Body> {
+        let document = json!({
             "issuer": state.issuer,
             "jwks_uri": format!("{}/jwks", state.issuer),
-        }))
+        });
+        if let Some(body) = *state.discovery_body.read().await {
+            return body.response(document);
+        }
+        Json(document).into_response()
     }
 
-    async fn jwks_response(State(state): State<ProviderState>) -> Json<Value> {
+    async fn jwks_response(State(state): State<ProviderState>) -> Response<Body> {
         state.jwks_requests.fetch_add(1, Ordering::SeqCst);
-        Json(state.jwks.read().await.clone())
+        let document = state.jwks.read().await.clone();
+        if let Some(body) = *state.jwks_body.read().await {
+            return body.response(document);
+        }
+        Json(document).into_response()
     }
 
     fn jwks(kid: &str) -> Value {
@@ -582,6 +682,7 @@ mod tests {
         provider.rotate_to("rotated").await;
         verifier.verify(&sign("rotated", &claims)).await.unwrap();
         assert_eq!(provider.state.jwks_requests.load(Ordering::SeqCst), 2);
+        verifier.verify(&sign("rotated", &claims)).await.unwrap();
 
         assert_eq!(
             verifier.verify(&sign("unknown", &claims)).await,
@@ -595,9 +696,10 @@ mod tests {
         let provider = TestProvider::start("initial").await;
         let mut config = provider.config.clone();
         config.jwks_max_age_seconds = 1;
+        config.jwks_refresh_interval_seconds = 1;
         let verifier = OidcAccessTokenVerifier::discover(&config).await.unwrap();
         let token = sign("initial", &valid_claims(&config.issuer_url));
-        tokio::time::sleep(Duration::from_millis(1_050)).await;
+        verifier.keys.write().await.fetched_at = Instant::now() - Duration::from_secs(2);
 
         let mut tasks = tokio::task::JoinSet::new();
         for _ in 0..8 {
@@ -633,13 +735,17 @@ mod tests {
         let provider = TestProvider::start("initial").await;
         let mut config = provider.config.clone();
         config.jwks_max_age_seconds = 1;
-        config.jwks_refresh_interval_seconds = 60;
+        config.jwks_refresh_interval_seconds = 1;
         let verifier = OidcAccessTokenVerifier::discover(&config).await.unwrap();
         let claims = valid_claims(&config.issuer_url);
-        tokio::time::sleep(Duration::from_millis(1_050)).await;
+        verifier.keys.write().await.fetched_at = Instant::now() - Duration::from_secs(2);
         provider.task.abort();
         let _ = provider.task.await;
 
+        assert_eq!(
+            verifier.verify(&sign("initial", &claims)).await,
+            Err(AccessTokenVerificationError::AuthenticationUnavailable)
+        );
         assert_eq!(
             verifier.verify(&sign("initial", &claims)).await,
             Err(AccessTokenVerificationError::AuthenticationUnavailable)
@@ -674,5 +780,196 @@ mod tests {
         let _ = provider.task.await;
 
         assert!(OidcAccessTokenVerifier::discover(&config).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_jwks_timers_before_fetching_metadata() {
+        let provider = TestProvider::start("initial").await;
+        let mut config = provider.config.clone();
+        config.jwks_max_age_seconds = config.jwks_refresh_interval_seconds - 1;
+        assert!(OidcAccessTokenVerifier::discover(&config).await.is_err());
+        assert_eq!(provider.state.jwks_requests.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn rejects_oversized_discovery_responses_with_declared_or_chunked_bodies() {
+        for body in [
+            MetadataBody::OversizedDeclared,
+            MetadataBody::OversizedChunked,
+        ] {
+            let provider = TestProvider::start("initial").await;
+            *provider.state.discovery_body.write().await = Some(body);
+            assert!(
+                OidcAccessTokenVerifier::discover(&provider.config)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(provider.state.jwks_requests.load(Ordering::SeqCst), 0);
+            provider.task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_oversized_initial_jwks_with_declared_or_chunked_bodies() {
+        for body in [
+            MetadataBody::OversizedDeclared,
+            MetadataBody::OversizedChunked,
+        ] {
+            let provider = TestProvider::start("initial").await;
+            *provider.state.jwks_body.write().await = Some(body);
+            assert!(
+                OidcAccessTokenVerifier::discover(&provider.config)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(provider.state.jwks_requests.load(Ordering::SeqCst), 1);
+            provider.task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_metadata_refresh_preserves_fresh_keys_but_fails_closed_when_stale() {
+        for body in [
+            MetadataBody::OversizedDeclared,
+            MetadataBody::OversizedChunked,
+            MetadataBody::InvalidJson,
+        ] {
+            let provider = TestProvider::start("initial").await;
+            let verifier = OidcAccessTokenVerifier::discover(&provider.config)
+                .await
+                .unwrap();
+            let claims = valid_claims(&provider.config.issuer_url);
+            *provider.state.jwks_body.write().await = Some(body);
+            assert_eq!(
+                verifier.verify(&sign("unknown", &claims)).await,
+                Err(AccessTokenVerificationError::AuthenticationUnavailable)
+            );
+            verifier.verify(&sign("initial", &claims)).await.unwrap();
+            verifier.keys.write().await.fetched_at =
+                Instant::now() - Duration::from_secs(provider.config.jwks_max_age_seconds + 1);
+            assert_eq!(
+                verifier.verify(&sign("initial", &claims)).await,
+                Err(AccessTokenVerificationError::AuthenticationUnavailable)
+            );
+            assert_eq!(provider.state.jwks_requests.load(Ordering::SeqCst), 2);
+            verifier.refresh.lock().await.last_attempt = None;
+            assert_eq!(
+                verifier.verify(&sign("initial", &claims)).await,
+                Err(AccessTokenVerificationError::AuthenticationUnavailable)
+            );
+            assert_eq!(provider.state.jwks_requests.load(Ordering::SeqCst), 3);
+            provider.task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn production_metadata_client_rejects_plaintext_before_sending() {
+        let provider = TestProvider::start("initial").await;
+        let mut config = provider.config.clone();
+        config.allow_insecure_http = false;
+        let client = metadata_client(&config).unwrap();
+        let error = client
+            .get(format!("{}/jwks", config.issuer_url))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(error.is_builder());
+        assert_eq!(provider.state.jwks_requests.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn rejects_malformed_signing_keys_at_startup_and_refresh() {
+        let provider = TestProvider::start("initial").await;
+        let verifier = OidcAccessTokenVerifier::discover(&provider.config)
+            .await
+            .unwrap();
+        let mut malformed = jwks("initial");
+        malformed["keys"][0]["n"] = json!("not valid base64!");
+        *provider.state.jwks.write().await = malformed;
+        assert!(
+            OidcAccessTokenVerifier::discover(&provider.config)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            verifier
+                .verify(&sign("unknown", &valid_claims(&provider.config.issuer_url)))
+                .await,
+            Err(AccessTokenVerificationError::AuthenticationUnavailable)
+        );
+        verifier
+            .verify(&sign("initial", &valid_claims(&provider.config.issuer_url)))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejects_jwks_without_an_allowed_verification_key() {
+        for rejected_key in [
+            json!({"kty": "RSA", "n": MODULUS, "e": "AQAB", "kid": "initial", "alg": "RS256", "use": "enc"}),
+            json!({"kty": "RSA", "n": MODULUS, "e": "AQAB", "kid": "initial", "alg": "RS256", "key_ops": ["sign"]}),
+            json!({"kty": "RSA", "n": MODULUS, "e": "AQAB", "kid": "initial", "alg": "RS384"}),
+            json!({"kty": "oct", "k": "c2VjcmV0", "kid": "initial", "alg": "RS256"}),
+            json!({"kty": "RSA", "n": MODULUS, "e": "AQAB", "kid": "", "alg": "RS256"}),
+        ] {
+            let provider = TestProvider::start("initial").await;
+            *provider.state.jwks.write().await = json!({"keys": [rejected_key]});
+            assert!(
+                OidcAccessTokenVerifier::discover(&provider.config)
+                    .await
+                    .is_err()
+            );
+            provider.task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn accepts_allowed_rsa_algorithms_when_jwk_omits_alg() {
+        let provider = TestProvider::start("initial").await;
+        let mut keys = jwks("initial");
+        keys["keys"][0].as_object_mut().unwrap().remove("alg");
+        *provider.state.jwks.write().await = keys;
+        let mut config = provider.config.clone();
+        config.allowed_algorithms.push("RS384".to_owned());
+        let verifier = OidcAccessTokenVerifier::discover(&config).await.unwrap();
+        let claims = valid_claims(&config.issuer_url);
+        verifier.verify(&sign("initial", &claims)).await.unwrap();
+        let mut header = Header::new(Algorithm::RS384);
+        header.kid = Some("initial".to_owned());
+        let token = encode(
+            &header,
+            &claims,
+            &EncodingKey::from_rsa_pem(PRIVATE_KEY).unwrap(),
+        )
+        .unwrap();
+        verifier.verify(&token).await.unwrap();
+        assert_eq!(provider.state.jwks_requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn preserves_first_usable_key_for_duplicate_kid_and_algorithm() {
+        let provider = TestProvider::start("initial").await;
+        let original = jwks("initial")["keys"][0].clone();
+        let mut unusable = original.clone();
+        unusable["key_ops"] = json!(["sign"]);
+        let mut later = original.clone();
+        later["n"] = json!("not valid base64!");
+        *provider.state.jwks.write().await = json!({"keys": [unusable, original, later]});
+        let verifier = OidcAccessTokenVerifier::discover(&provider.config)
+            .await
+            .unwrap();
+        verifier
+            .verify(&sign("initial", &valid_claims(&provider.config.issuer_url)))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejects_symmetric_hmac_in_the_configured_allow_list() {
+        let provider = TestProvider::start("initial").await;
+        let mut config = provider.config.clone();
+        config.allowed_algorithms.push("HS256".to_owned());
+        assert!(OidcAccessTokenVerifier::discover(&config).await.is_err());
+        assert_eq!(provider.state.jwks_requests.load(Ordering::SeqCst), 0);
     }
 }

@@ -65,9 +65,9 @@ The queue provides:
 - Exponential retry delays.
 - A configurable attempt limit and `dead` status.
 - Worker leases and recovery of jobs abandoned by a crashed worker.
-- Ownership checks before a worker can complete or fail a claimed job.
+- Attempt-fenced ownership checks before a worker can renew, complete, or fail a claimed job.
 - A handler registry keyed by `job_type`.
-- Periodic cleanup independent of job success. Completed and dead retention are separately configurable; each pass deletes at most 1,000 rows.
+- Periodic cleanup independent of job success. Completed and dead retention are separately configurable; each cycle deletes up to 16 batches of 1,000 rows and yields between batches.
 
 The included `user.created` handler validates the payload and logs it to demonstrate the full path. Replace or extend that handler with a real idempotent side effect.
 
@@ -84,12 +84,14 @@ To retry one dead job after fixing its cause:
 ```sql
 UPDATE background_jobs
 SET status = 'pending',
-    attempts = 0,
+    max_attempts = attempts + 5,
     available_at = NOW(),
     last_error = NULL,
     updated_at = NOW()
 WHERE id = '<job-uuid>' AND status = 'dead';
 ```
+
+This grants five additional attempts without resetting the monotonic attempt number used to fence stale owners.
 
 Run more worker processes to increase throughput:
 
@@ -98,7 +100,7 @@ JOB_WORKER_ID=worker-1 cargo run -- worker
 JOB_WORKER_ID=worker-2 cargo run -- worker
 ```
 
-Keep each worker ID unique. `JOB_LEASE_TIMEOUT_SECONDS` must be longer than the normal maximum runtime of a handler; processing is at-least-once, so every real handler must also be idempotent.
+Keep each worker ID unique for operational identification. While an async handler runs, the worker renews its lease approximately every third of `JOB_LEASE_TIMEOUT_SECONDS`. Renewal and terminal writes are bounded by the remaining ownership budget; renewal failure cancels the handler future without a stale completion or failure update. Cancellation cannot undo committed or independently spawned side effects: processing remains at-least-once, so every real handler must be idempotent and must not block the async runtime.
 
 ## API
 
@@ -131,12 +133,12 @@ This service validates externally issued JWT access tokens; it does not store pa
 - `OIDC_HTTP_TIMEOUT_SECONDS` (optional, default `5`): discovery and JWKS request timeout.
 - `OIDC_CLOCK_SKEW_SECONDS` (optional, default `30`): allowed token timestamp skew.
 - `OIDC_JWKS_REFRESH_INTERVAL_SECONDS` (optional, default `60`): minimum interval between unknown-key JWKS refreshes.
-- `OIDC_JWKS_MAX_AGE_SECONDS` (optional, default `300`): maximum key-cache age before refresh is mandatory.
+- `OIDC_JWKS_MAX_AGE_SECONDS` (optional, default `300`): maximum key-cache age before refresh is mandatory; must be greater than or equal to `OIDC_JWKS_REFRESH_INTERVAL_SECONDS`.
 - `OIDC_MAX_TOKEN_LIFETIME_SECONDS` (optional, default `3600`): maximum interval between required `iat` and `exp` claims.
 
 For a complete local Keycloak and Postman walkthrough, see [Keycloak Setup Guide](docs/keycloak-setup.md).
 
-At HTTP startup, the service loads discovery metadata and the initial JWKS. Startup fails if either is unavailable or invalid. Unless insecure HTTP is explicitly allowed, the configured issuer, discovered issuer, and JWKS URI must use HTTPS. Signing keys are cached; an unknown `kid` triggers at most one refresh per configured interval. Once the cache reaches `OIDC_JWKS_MAX_AGE_SECONDS`, refresh is mandatory even for an unchanged `kid`; a failure returns `503 authentication_unavailable` and stale key material is not used. The refresh interval throttles retries to protect the provider.
+At HTTP startup, the service loads discovery metadata and the initial JWKS. Startup fails if either is unavailable or invalid. Each document is limited to 1 MiB, including responses without `Content-Length` or with chunked transfer encoding. Unless insecure HTTP is explicitly allowed, the configured issuer, discovered issuer, JWKS URI, and redirect transport must use HTTPS; cross-host JWKS URLs remain supported. Signing keys are decoded once per key-set load and cached by key ID and algorithm; malformed selected signing keys reject startup or refresh. An unknown `kid` triggers at most one refresh per configured interval. Once the cache reaches `OIDC_JWKS_MAX_AGE_SECONDS`, refresh is mandatory even for an unchanged `kid`; a failure returns `503 authentication_unavailable` and stale key material is not used. The refresh interval throttles retries to protect the provider.
 
 Tokens must have a signature from a discovered signing key, an allowed algorithm, matching `iss` and `aud`, valid `exp`, required `iat`, and optional `nbf` timestamps, a non-empty `sub`, and a standard space-delimited `scope` claim. Future `iat` outside clock skew and excessive token lifetime are rejected. Authentication failures use the existing JSON error envelope plus a `WWW-Authenticate: Bearer` challenge.
 
@@ -323,9 +325,9 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 ```
 
-Set `TEST_DATABASE_URL` to include the real PostgreSQL queue lifecycle test locally. Without it, that one test returns early; all dependency-free tests still run. CI provisions PostgreSQL and always executes the database path.
+Set `TEST_DATABASE_URL` to include the real PostgreSQL queue tests locally. Each test creates and drops its own schema, including its migration ledger; the database account therefore needs schema creation permission. Without the URL, PostgreSQL tests return early; dependency-free tests still run. CI provisions PostgreSQL and always executes concurrent claiming, lease renewal/recovery, stale-attempt fencing, and multi-batch retention regressions.
 
-CI treats a missing `TEST_DATABASE_URL` as an error, performs locked release and Docker builds, and runs `cargo audit`. A weekly schedule catches advisories published after dependencies were last changed.
+CI treats a missing `TEST_DATABASE_URL` as an error, performs locked release and Docker builds, and runs `cargo audit`. A separate Rust 1.93 job runs the full suite and locked release build on the minimum supported compiler, alongside the stable quality job. A weekly schedule catches advisories published after dependencies were last changed.
 
 ```bash
 TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/base_skeleton \

@@ -528,6 +528,8 @@ The key cache has two independent timers:
 - `OIDC_JWKS_MAX_AGE_SECONDS` determines whether cached material is still trustworthy.
 - `OIDC_JWKS_REFRESH_INTERVAL_SECONDS` throttles unknown-key refresh and retry attempts.
 
+The maximum age must be greater than or equal to the refresh interval; shorter maximum ages fail validation before discovery. Each discovery/JWKS document is capped at 1 MiB regardless of transfer encoding. Production HTTP clients enforce HTTPS through redirects while allowing legitimate cross-host JWKS URLs. Usable keys are decoded on load and indexed by `(kid, algorithm)`, not rebuilt for each token; malformed selected signing keys reject startup or refresh.
+
 Fresh cached keys continue to verify tokens during a temporary provider outage. Once stale, refresh is mandatory even if `kid` has not changed. Failed stale refresh returns `503 authentication_unavailable`; stale keys are not used indefinitely. A mutex provides single-flight refresh so concurrent requests do not stampede the provider.
 
 ### Scope policy
@@ -623,8 +625,8 @@ Partial indexes support pending selection and expired running-lease discovery. A
 | Operation | Transaction behavior |
 | --- | --- |
 | Create user with job | Explicit transaction around both inserts |
-| Claim job | Explicit transaction around lease recovery and one `SKIP LOCKED` claim |
-| Complete/fail job | Single conditional update guarded by worker ownership |
+| Claim job | Explicit transaction around bounded `SKIP LOCKED` lease recovery and one pending-job claim |
+| Renew/complete/fail job | Single conditional update guarded by worker ID and claimed attempt |
 | Update/delete user | Single statement; update uses optimistic timestamp condition |
 
 ## Redis caching
@@ -663,7 +665,7 @@ stateDiagram-v2
 
 Workers select one eligible pending job ordered by `available_at, created_at` using `FOR UPDATE SKIP LOCKED`. Multiple workers can safely share the queue without a central coordinator. Claiming increments attempts and records the worker lease.
 
-Before selecting work, each claim transaction recovers expired running jobs:
+Before selecting work, each claim transaction recovers at most 1,000 expired running jobs, skipping rows locked by other transactions:
 
 - Requeue as `pending` when attempts remain.
 - Mark `dead` when the attempt budget is exhausted.
@@ -671,13 +673,16 @@ Before selecting work, each claim transaction recovers expired running jobs:
 
 ### Ownership
 
-Completion and failure updates require all of:
+Renewal, completion, and failure updates require all of:
 
 - Matching job ID.
 - Current status `running`.
 - Matching `locked_by` worker ID.
+- Matching claimed attempt number.
 
-Zero affected rows means `LeaseLost`. A slow worker therefore cannot overwrite a job after ownership has moved elsewhere.
+Zero affected rows means `LeaseLost`. A stale attempt cannot overwrite a newer claim even when its worker ID is reused. Manual dead-job retries must preserve attempt numbers and increase `max_attempts` instead of resetting `attempts`.
+
+During handler execution the worker renews ownership approximately every third of the lease timeout. Renewal and terminal writes are bounded by the remaining conservative lease budget. Renewal failure drops the handler future without a stale terminal update; already committed or independently spawned side effects cannot be undone.
 
 ### Retry policy
 
@@ -699,7 +704,7 @@ Delivery is at least once. A handler may complete its external side effect and c
 
 ### Cleanup
 
-Cleanup runs immediately at worker startup and every `JOB_CLEANUP_INTERVAL_SECONDS`, independent of job success. One pass deletes at most 1,000 oldest terminal rows:
+Cleanup runs immediately at worker startup and every `JOB_CLEANUP_INTERVAL_SECONDS`, independent of job success. Each `SKIP LOCKED` delete removes at most 1,000 oldest eligible terminal rows; a cycle processes at most 16 batches (16,000 rows), yields between batches, and can be cancelled during shutdown. Backlogs beyond the cap require later cycles or a shorter interval. The eligibility rules remain:
 
 - `completed` rows older than `JOB_COMPLETED_RETENTION_SECONDS`, based on `completed_at`.
 - `dead` rows older than `JOB_DEAD_RETENTION_SECONDS`, based on `updated_at`.
@@ -834,7 +839,7 @@ All numeric values above that represent sizes, limits, or timeouts must be posit
 | `OIDC_HTTP_TIMEOUT_SECONDS` | `5` | No | Discovery and JWKS HTTP timeout |
 | `OIDC_CLOCK_SKEW_SECONDS` | `30` | No | Timestamp validation leeway |
 | `OIDC_JWKS_REFRESH_INTERVAL_SECONDS` | `60` | No | Minimum refresh/retry interval |
-| `OIDC_JWKS_MAX_AGE_SECONDS` | `300` | No | Maximum usable cached-key age |
+| `OIDC_JWKS_MAX_AGE_SECONDS` | `300` | No | Maximum usable cached-key age; must be at least the refresh interval |
 | `OIDC_MAX_TOKEN_LIFETIME_SECONDS` | `3600` | No | Maximum `exp - iat` |
 
 ### Rate limiting and metrics endpoint
@@ -1061,7 +1066,7 @@ Before registering it, decide:
 - Error-envelope mapping.
 - Whether it creates durable asynchronous work.
 
-Update `normalized_route` when adding a new route pattern; otherwise metrics use the bounded `unmatched` label.
+HTTP metrics obtain route templates from Axum `MatchedPath` automatically. Unmatched requests retain the bounded `unmatched` label; adding a route does not require maintaining a separate path list.
 
 ### Add a migration
 
