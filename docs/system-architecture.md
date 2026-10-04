@@ -528,7 +528,7 @@ The key cache has two independent timers:
 - `OIDC_JWKS_MAX_AGE_SECONDS` determines whether cached material is still trustworthy.
 - `OIDC_JWKS_REFRESH_INTERVAL_SECONDS` throttles unknown-key refresh and retry attempts.
 
-The maximum age must be greater than or equal to the refresh interval; shorter maximum ages fail validation before discovery. Each discovery/JWKS document is capped at 1 MiB regardless of transfer encoding. Production HTTP clients enforce HTTPS through redirects while allowing legitimate cross-host JWKS URLs. Usable keys are decoded on load and indexed by `(kid, algorithm)`, not rebuilt for each token; malformed selected signing keys reject startup or refresh.
+The maximum age must be greater than or equal to the refresh interval; shorter maximum ages fail validation before discovery. Each discovery/JWKS document is capped at 1 MiB regardless of transfer encoding. Production HTTP clients enforce HTTPS, never follow redirects, and still allow cross-host JWKS URLs. Usable keys are decoded on load and indexed by `(kid, algorithm)`, not rebuilt for each token; malformed selected signing keys reject startup or refresh.
 
 Fresh cached keys continue to verify tokens during a temporary provider outage. Once stale, refresh is mandatory even if `kid` has not changed. Failed stale refresh returns `503 authentication_unavailable`; stale keys are not used indefinitely. A mutex provides single-flight refresh so concurrent requests do not stampede the provider.
 
@@ -704,7 +704,7 @@ Delivery is at least once. A handler may complete its external side effect and c
 
 ### Cleanup
 
-Cleanup runs immediately at worker startup and every `JOB_CLEANUP_INTERVAL_SECONDS`, independent of job success. Each `SKIP LOCKED` delete removes at most 1,000 oldest eligible terminal rows; a cycle processes at most 16 batches (16,000 rows), yields between batches, and can be cancelled during shutdown. Backlogs beyond the cap require later cycles or a shorter interval. The eligibility rules remain:
+Cleanup runs immediately at worker startup and every `JOB_CLEANUP_INTERVAL_SECONDS`, independent of job success. Each `SKIP LOCKED` delete removes at most 1,000 oldest eligible terminal rows (served by partial retention indexes on `completed_at` and `updated_at`); a cycle processes at most 16 batches (16,000 rows), yields between batches, and can be cancelled during shutdown. Backlogs beyond the cap require later cycles or a shorter interval. The eligibility rules remain:
 
 - `completed` rows older than `JOB_COMPLETED_RETENTION_SECONDS`, based on `completed_at`.
 - `dead` rows older than `JOB_DEAD_RETENTION_SECONDS`, based on `updated_at`.
@@ -1089,7 +1089,7 @@ HTTP metrics obtain route templates from Axum `MatchedPath` automatically. Unmat
 - The job queue has no archive table or administrative HTTP API.
 - Dead jobs are permanently deleted after retention unless operators export them externally.
 - Jobs are processed serially within each worker process.
-- There is no automatic heartbeat/lease extension for a handler that runs longer than `JOB_LEASE_TIMEOUT_SECONDS`.
+- Handler leases are renewed automatically, but handlers must stay cooperative async code; blocking the runtime starves renewal and loses the lease.
 - Pagination is offset-based and has no total-count response.
 - There is no formal OpenAPI specification yet.
 - PostgreSQL readiness verifies migration state, not a synthetic write transaction.

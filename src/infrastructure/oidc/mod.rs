@@ -251,6 +251,8 @@ impl AccessTokenVerifier for OidcAccessTokenVerifier {
 fn metadata_client(config: &OidcConfig) -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .https_only(!config.allow_insecure_http)
+        // Discovery and JWKS endpoints are fetched exactly as configured.
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(config.http_timeout_seconds))
         .build()
         .context("could not construct OIDC HTTP client")
@@ -264,9 +266,12 @@ where
         .get(url)
         .send()
         .await
-        .map_err(|_| anyhow::anyhow!("OIDC metadata request failed"))?
-        .error_for_status()
-        .map_err(|_| anyhow::anyhow!("OIDC metadata request returned an unsuccessful status"))?;
+        .map_err(|_| anyhow::anyhow!("OIDC metadata request failed"))?;
+    // Redirects are disabled, so a 3xx must fail rather than parse as metadata.
+    ensure!(
+        response.status().is_success(),
+        "OIDC metadata request returned an unsuccessful status"
+    );
     let content_length = response.content_length();
     ensure!(
         content_length.is_none_or(|length| length <= MAX_METADATA_RESPONSE_BYTES as u64),
@@ -875,6 +880,24 @@ mod tests {
             .unwrap_err();
         assert!(error.is_builder());
         assert_eq!(provider.state.jwks_requests.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn metadata_client_does_not_follow_redirects() {
+        let provider = TestProvider::start("initial").await;
+        let target = format!("{}/jwks", provider.config.issuer_url);
+        let app = Router::new().route(
+            "/redirect",
+            get(move || async move { axum::response::Redirect::temporary(&target) }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/redirect", listener.local_addr().unwrap());
+        let redirector = tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let client = metadata_client(&provider.config).unwrap();
+        assert!(fetch_json::<Value>(&client, &url).await.is_err());
+        assert_eq!(provider.state.jwks_requests.load(Ordering::SeqCst), 0);
+        redirector.abort();
     }
 
     #[tokio::test]

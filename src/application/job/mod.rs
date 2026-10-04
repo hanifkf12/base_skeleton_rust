@@ -3,7 +3,9 @@ mod ports;
 mod worker;
 
 pub use model::{ClaimedJob, JobDisposition, NewJob, USER_CREATED_JOB};
-pub use ports::{JobHandler, JobHandlerError, JobQueue, JobQueueError, JobTracer};
+pub use ports::{
+    JobHandler, JobHandlerError, JobQueue, JobQueueError, JobTracer, PURGE_BATCH_SIZE,
+};
 pub use worker::{JobWorker, JobWorkerConfig, RunOutcome};
 
 #[cfg(test)]

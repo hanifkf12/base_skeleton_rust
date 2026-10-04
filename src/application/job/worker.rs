@@ -8,6 +8,7 @@ use tracing::Instrument;
 
 use super::{
     ClaimedJob, JobDisposition, JobHandler, JobHandlerError, JobQueue, JobQueueError, JobTracer,
+    PURGE_BATCH_SIZE,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,6 +162,7 @@ impl JobWorker {
         tokio::pin!(handler);
         let interval = (self.config.lease_timeout / 3).max(Duration::from_nanos(1));
         let mut deadline = claimed_at + self.config.lease_timeout;
+        let retry_interval = (interval / 4).max(Duration::from_nanos(1));
         let mut next_renewal = claimed_at + interval;
 
         loop {
@@ -187,19 +189,24 @@ impl JobWorker {
             tokio::pin!(renewal);
             // Continue polling the handler while the database renews. If it
             // finishes during renewal, establish ownership before any terminal write.
-            let finished = tokio::select! {
+            let (renewal, finished) = tokio::select! {
                 biased;
-                result = &mut renewal => {
-                    result.map_err(|_| JobQueueError::LeaseLost)??;
-                    None
-                }
-                result = &mut handler => {
-                    renewal.await.map_err(|_| JobQueueError::LeaseLost)??;
-                    Some(result)
-                }
+                result = &mut renewal => (result, None),
+                result = &mut handler => (renewal.await, Some(result)),
             };
-            deadline = renewal_started + self.config.lease_timeout;
-            next_renewal = renewal_started + interval;
+            match renewal {
+                Ok(Ok(())) => {
+                    deadline = renewal_started + self.config.lease_timeout;
+                    next_renewal = renewal_started + interval;
+                }
+                Ok(Err(JobQueueError::LeaseLost)) | Err(_) => return Err(JobQueueError::LeaseLost),
+                Ok(Err(error)) => {
+                    // The stored lease is unchanged, so ownership remains valid until
+                    // the existing deadline. Retry rather than abandon a healthy handler.
+                    tracing::warn!(job_id = %job.id, %error, "job lease renewal failed; retrying");
+                    next_renewal = tokio::time::Instant::now() + retry_interval;
+                }
+            }
             if let Some(result) = finished {
                 return Ok((result, deadline));
             }
@@ -207,8 +214,7 @@ impl JobWorker {
     }
 
     pub async fn run_maintenance(&self) -> Result<u64, JobQueueError> {
-        // Each adapter statement deletes at most 1,000 rows; a finite cycle
-        // drains ordinary backlogs without monopolizing a worker indefinitely.
+        // A finite cycle drains ordinary backlogs without monopolizing a worker.
         let mut total = 0;
         for _ in 0..16 {
             let purged = self
@@ -216,7 +222,7 @@ impl JobWorker {
                 .purge_terminal(self.config.completed_retention, self.config.dead_retention)
                 .await?;
             total += purged;
-            if purged < 1_000 {
+            if purged < PURGE_BATCH_SIZE {
                 break;
             }
             tokio::task::yield_now().await;

@@ -1,0 +1,2 @@
+DROP INDEX IF EXISTS background_jobs_dead_retention_idx;
+DROP INDEX IF EXISTS background_jobs_completed_retention_idx;

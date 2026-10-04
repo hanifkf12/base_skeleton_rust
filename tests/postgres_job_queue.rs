@@ -604,7 +604,7 @@ async fn postgres_heartbeat_keeps_a_handler_owned_beyond_its_original_lease() {
 }
 
 #[tokio::test]
-async fn unavailable_postgres_renewal_cancels_handler_without_completing_the_job() {
+async fn persistent_postgres_renewal_outage_cancels_handler_at_lease_expiry() {
     let Some(database) = TestDatabase::new().await else {
         return;
     };
@@ -626,13 +626,17 @@ async fn unavailable_postgres_renewal_cancels_handler_without_completing_the_job
     let execution = tokio::spawn(async move { worker.run_once().await });
     started.notified().await;
     database.pool.close().await;
+    // Renewal errors are retried until the lease budget is exhausted, then the
+    // handler is cancelled without any terminal write.
+    let began = tokio::time::Instant::now();
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(3), execution)
+        tokio::time::timeout(Duration::from_secs(6), execution)
             .await
             .unwrap()
             .unwrap(),
-        Err(JobQueueError::Unavailable),
+        Err(JobQueueError::LeaseLost),
     );
+    assert!(began.elapsed() <= Duration::from_secs(4));
     release.notify_one();
     tokio::task::yield_now().await;
     assert_eq!(effects.load(Ordering::SeqCst), 0);

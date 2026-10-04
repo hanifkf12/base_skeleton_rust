@@ -262,7 +262,7 @@ JWKS caching uses two different controls:
 
 An unknown `kid` or stale cache may trigger refresh. Refresh is single-flight inside a process. Once cached keys are stale, refresh failure must return `authentication_unavailable`; do not fall back to stale keys indefinitely.
 
-The maximum JWKS age must be at least the refresh interval; configuration loading and discovery reject shorter maximum ages. Discovery/JWKS responses are capped at 1 MiB even when chunked. HTTPS-only transport also constrains redirects unless local insecure HTTP is enabled. Selected signing keys are decoded when a key set is loaded and indexed by `(kid, algorithm)` for allocation-free key lookup; malformed selected key material rejects the load.
+The maximum JWKS age must be at least the refresh interval; configuration loading and discovery reject shorter maximum ages. Discovery/JWKS responses are capped at 1 MiB even when chunked. Metadata clients are HTTPS-only unless local insecure HTTP is enabled and never follow redirects; any non-2xx response, including 3xx, fails the fetch. Selected signing keys are decoded when a key set is loaded and indexed by `(kid, algorithm)` for allocation-free key lookup; malformed selected key material rejects the load.
 
 ### Client IP and rate limiting
 
@@ -833,6 +833,9 @@ migrations/20260801000000_create_background_jobs.up.sql
 migrations/20260802000000_add_background_job_trace_context.up.sql
     Durable W3C trace context for asynchronous trace continuation
 
+migrations/20261004000000_add_background_job_retention_indexes.up.sql
+    Partial indexes serving completed/dead retention purges
+
 src/application/job/
     Queue models and ports, handler contract, retry orchestration
 
@@ -994,7 +997,7 @@ When `JOB_WORKER_ID` is omitted, the process generates a UUID-based ID.
 | `JOB_DEAD_RETENTION_SECONDS` | `2592000` | Age after which dead jobs become cleanup candidates |
 | `JOB_CLEANUP_INTERVAL_SECONDS` | `3600` | Interval between periodic maintenance passes |
 
-The worker renews an active handler's lease approximately every third of `JOB_LEASE_TIMEOUT_SECONDS`. Claim/renewal start times conservatively bound ownership, and renewal and terminal database writes cannot wait past that budget. Renewal failure cancels the handler future without a stale terminal write. Handlers must remain cooperative async operations and idempotent; cancellation cannot undo committed or independently spawned side effects. `JobWorkerConfig` groups the worker ID, lease, retry, and retention settings, while bootstrap keeps cleanup scheduling and iteration handling separate.
+The worker renews an active handler's lease approximately every third of `JOB_LEASE_TIMEOUT_SECONDS`. Claim/renewal start times conservatively bound ownership, and renewal and terminal database writes cannot wait past that budget. A transient renewal error is retried (about every eighth of the lease) until the existing deadline; lost ownership or an expired budget cancels the handler future without a stale terminal write. All workers must use the same `JOB_LEASE_TIMEOUT_SECONDS`, since the claiming worker applies its own lease to reap expired rows. Handlers must remain cooperative async operations and idempotent; cancellation cannot undo committed or independently spawned side effects. `JobWorkerConfig` groups the worker ID, lease, retry, and retention settings, while bootstrap keeps cleanup scheduling and iteration handling separate.
 
 ### Adding a new job type
 

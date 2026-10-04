@@ -7,6 +7,10 @@ use uuid::Uuid;
 
 use super::{ClaimedJob, JobDisposition, NewJob};
 
+/// Maximum terminal jobs a single `JobQueue::purge_terminal` call may delete.
+/// A call that deletes fewer rows has drained the eligible backlog.
+pub const PURGE_BATCH_SIZE: u64 = 1_000;
+
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum JobQueueError {
     #[error("the job queue is unavailable")]
@@ -58,8 +62,8 @@ pub trait JobQueue: Send + Sync {
         retry_delay: Duration,
     ) -> Result<JobDisposition, JobQueueError>;
 
-    /// Delete at most 1,000 eligible terminal jobs per call. Workers may call
-    /// repeatedly within a finite maintenance cycle to drain larger backlogs.
+    /// Delete at most `PURGE_BATCH_SIZE` eligible terminal jobs per call. Workers
+    /// may call repeatedly within a finite maintenance cycle to drain larger backlogs.
     async fn purge_terminal(
         &self,
         completed_older_than: Duration,

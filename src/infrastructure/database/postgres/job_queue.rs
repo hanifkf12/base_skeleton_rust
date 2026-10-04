@@ -5,7 +5,9 @@ use serde_json::Value;
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
-use crate::application::job::{ClaimedJob, JobDisposition, JobQueue, JobQueueError, NewJob};
+use crate::application::job::{
+    ClaimedJob, JobDisposition, JobQueue, JobQueueError, NewJob, PURGE_BATCH_SIZE,
+};
 
 pub struct PostgresJobQueue {
     pool: PgPool,
@@ -246,13 +248,14 @@ impl JobQueue for PostgresJobQueue {
                           AND updated_at < NOW() - ($2 * INTERVAL '1 second'))
                    ORDER BY updated_at, id
                    FOR UPDATE SKIP LOCKED
-                   LIMIT 1000
+                   LIMIT $3
                )
                DELETE FROM background_jobs AS jobs
                USING expired WHERE jobs.id = expired.id"#,
         )
         .bind(completed_retention_seconds)
         .bind(dead_retention_seconds)
+        .bind(PURGE_BATCH_SIZE as i64)
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected())

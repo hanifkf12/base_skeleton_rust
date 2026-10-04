@@ -25,6 +25,7 @@ enum Renewal {
     Healthy,
     Lost,
     Unavailable,
+    FailsOnce,
     Stalled,
 }
 
@@ -41,6 +42,7 @@ struct Entry {
 struct FakeQueue {
     entries: Mutex<VecDeque<Entry>>,
     renewal: Renewal,
+    renewals: AtomicUsize,
 }
 
 impl FakeQueue {
@@ -55,6 +57,7 @@ impl FakeQueue {
                 lease: Duration::ZERO,
             }])),
             renewal,
+            renewals: AtomicUsize::new(0),
         }
     }
 
@@ -125,9 +128,11 @@ impl JobQueue for FakeQueue {
     }
 
     async fn renew(&self, id: Uuid, worker: &str, attempt: u32) -> Result<(), JobQueueError> {
+        let call = self.renewals.fetch_add(1, Ordering::SeqCst);
         match self.renewal {
             Renewal::Stalled => std::future::pending().await,
             Renewal::Unavailable => Err(JobQueueError::Unavailable),
+            Renewal::FailsOnce if call == 0 => Err(JobQueueError::Unavailable),
             Renewal::Lost => {
                 let mut entries = self.entries.lock();
                 let entry = entries.iter_mut().find(|entry| entry.job.id == id).unwrap();
@@ -135,7 +140,7 @@ impl JobQueue for FakeQueue {
                 entry.job.attempts += 1;
                 Err(JobQueueError::LeaseLost)
             }
-            Renewal::Healthy => {
+            Renewal::Healthy | Renewal::FailsOnce => {
                 let mut entries = self.entries.lock();
                 let entry = entries
                     .iter_mut()
@@ -326,10 +331,10 @@ async fn heartbeat_keeps_a_long_handler_owned() {
 
 #[tokio::test(start_paused = true)]
 async fn renewal_failures_cancel_the_handler_without_terminal_writes() {
-    for (mode, expected, attempts) in [
-        (Renewal::Lost, JobQueueError::LeaseLost, 2),
-        (Renewal::Unavailable, JobQueueError::Unavailable, 1),
-        (Renewal::Stalled, JobQueueError::LeaseLost, 1),
+    for (mode, attempts) in [
+        (Renewal::Lost, 2),
+        (Renewal::Unavailable, 1),
+        (Renewal::Stalled, 1),
     ] {
         let queue = Arc::new(FakeQueue::with_job(claimed_job("test.success", 0), mode));
         let effects = Arc::new(AtomicUsize::new(0));
@@ -341,7 +346,10 @@ async fn renewal_failures_cancel_the_handler_without_terminal_writes() {
             })],
         );
         let started = Instant::now();
-        assert_eq!(worker.run_once().await.unwrap_err(), expected);
+        assert_eq!(
+            worker.run_once().await.unwrap_err(),
+            JobQueueError::LeaseLost
+        );
         assert!(started.elapsed() <= Duration::from_secs(9));
         tokio::time::advance(Duration::from_secs(60)).await;
         assert_eq!(effects.load(Ordering::SeqCst), 0);
@@ -351,6 +359,25 @@ async fn renewal_failures_cancel_the_handler_without_terminal_writes() {
     }
 }
 
+#[tokio::test(start_paused = true)]
+async fn transient_renewal_failure_is_retried_within_the_lease() {
+    let queue = Arc::new(FakeQueue::with_job(
+        claimed_job("test.success", 0),
+        Renewal::FailsOnce,
+    ));
+    let effects = Arc::new(AtomicUsize::new(0));
+    let worker = worker(
+        queue.clone(),
+        vec![Arc::new(DelayedHandler {
+            duration: Duration::from_secs(5),
+            effects: effects.clone(),
+        })],
+    );
+    assert_eq!(worker.run_once().await.unwrap(), RunOutcome::Completed);
+    assert_eq!(effects.load(Ordering::SeqCst), 1);
+    assert_eq!(queue.renewals.load(Ordering::SeqCst), 2);
+    assert_eq!(queue.entries.lock()[0].status, "completed");
+}
 #[tokio::test(start_paused = true)]
 async fn handler_finishing_during_a_stalled_renewal_does_not_complete_the_job() {
     let queue = Arc::new(FakeQueue::with_job(
