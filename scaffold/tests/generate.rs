@@ -2,6 +2,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -11,12 +12,15 @@ struct TempDir(PathBuf);
 
 impl TempDir {
     fn new(label: &str) -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
+        // Tests run on parallel threads; the clock alone can repeat on coarse timers.
+        let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "skeleton-new-test-{label}-{}-{nanos}",
+            "skeleton-new-test-{label}-{}-{sequence}-{nanos}",
             std::process::id()
         ));
         fs::create_dir_all(&path).unwrap();

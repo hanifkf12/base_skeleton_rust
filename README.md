@@ -4,6 +4,136 @@ A working user CRUD API organized around Clean Architecture boundaries. PostgreS
 
 For the full system-level view—including Mermaid diagrams, runtime flows, security boundaries, data consistency, failure modes, deployment topology, and extension guidance—see [Complete System Architecture](docs/system-architecture.md).
 
+## First-time setup
+
+Follow this once after you create a project from the skeleton (for example with `skeleton-new`) or clone it. Day-to-day commands are in [Run locally](#run-locally) and [Commands](#commands).
+
+### 1. Install the tools
+
+| Tool | Needed for |
+| --- | --- |
+| Rust 1.93 or newer with `rustfmt` and `clippy` | Building and checking the service (`rustup component add rustfmt clippy`) |
+| Docker with Compose | Local PostgreSQL, Redis, and Keycloak (`docker compose up -d`) |
+| `git` | Version control for your project |
+| `jq` (optional) | The token example in [Obtain a token and call the API](#obtain-a-token-and-call-the-api) |
+| `cargo-audit`, `cargo-deny` (optional) | `make audit` and parity with CI's dependency checks |
+
+### 2. Start the project's own git history
+
+A generated project has no `.git`, so start one before you change anything:
+
+```bash
+git init -b main
+git add -A
+git commit -m "chore: initial commit from skeleton"
+```
+
+`.gitignore` already excludes `.env`, `target/`, and editor or tool state, so the next step cannot leak a secret into this commit. Add your remote and push when ready; `.github/workflows/ci.yml` runs on every push and needs no secrets.
+
+### 3. Check the names that were derived for you
+
+`skeleton-new` rewrites the skeleton's names from your project name. With `skeleton-new orders`:
+
+| Where | Value |
+| --- | --- |
+| Cargo package, binary, `RUST_LOG` filter | `orders` |
+| Docker image (`Makefile`), `OTEL_SERVICE_NAME` | `orders` |
+| Local database in `compose.yaml` and `DATABASE_URL`; CI test database | `orders`, `orders_test` |
+| OIDC audience, Keycloak demo client and scope names | `orders-api`, `orders-audience` |
+
+A name that contains `-` or `_` is written snake-case where Rust or SQL needs it and kebab-case elsewhere. Because the audience is `<name>-api`, a project called `orders-api` gets the audience `orders-api-api`; rename it consistently in `.env.example`, `keycloak/demo-realm.json`, and the docs if you prefer something else.
+
+### 4. Create your `.env`
+
+```bash
+cp .env.example .env        # or: make env
+```
+
+`.env` is git-ignored. The defaults match `compose.yaml` and the demo Keycloak realm, so nothing has to change for local development. Review these before you share the project:
+
+| Variable | Local default | Note |
+| --- | --- | --- |
+| `DATABASE_URL` | `postgres://postgres:postgres@localhost:5432/<name>` | Matches the Compose database; every command uses it |
+| `OIDC_ISSUER_URL`, `OIDC_AUDIENCE` | demo realm on `http://localhost:8081`, `<name>-api` | Required only by `http` and `all`; see [Set up authorization](#set-up-authorization) for a real provider |
+| `OIDC_ALLOW_INSECURE_HTTP` | `true` | Local Keycloak only; use `false` and HTTPS issuer/JWKS URLs everywhere else |
+| `REDIS_URL` | `redis://localhost:6379` | Optional cache; remove it to run without Redis |
+| `METRICS_PROMETHEUS_BEARER_TOKEN`, `OTEL_*` | empty | Metrics and tracing stay disabled until set |
+
+Every variable is explained in `.env.example`.
+
+### 5. Start the dependencies
+
+```bash
+docker compose up -d        # or: make deps-up
+docker compose ps           # wait until postgres, redis, and keycloak are healthy
+```
+
+Keycloak needs about a minute on first start. Its admin console is at http://localhost:8081 (`admin` / `admin`, local use only). If a port is taken (`5432`, `6379`, `8081`), change the mapping in `compose.yaml` and the matching URL in `.env`.
+
+### 6. Apply the migrations
+
+```bash
+cargo run -- db migrate     # or: make db-migrate
+cargo run -- db info        # every migration should show "applied"
+```
+
+`http`, `worker`, and `all` never change the schema on their own. For local work, `cargo run -- all --migrate` migrates and then starts both. The first `cargo` command compiles all dependencies, which takes a while.
+
+### 7. Run the service and check it
+
+```bash
+cargo run -- all            # or: make all
+```
+
+In another terminal:
+
+```bash
+curl -i http://localhost:3000/health/live      # 200
+curl -i http://localhost:3000/health/ready     # 200 when PostgreSQL is reachable
+curl -i http://localhost:3000/api/v1/users     # 401 until you send a token
+```
+
+If `Redis is unavailable; user cache is disabled` appears in the log, the service keeps working without the cache.
+
+### 8. Get a token and create the first user
+
+The demo realm ships with clients and scopes but **no users**. In the Keycloak console choose realm `demo`, create a user under **Users**, and set a non-temporary password under **Credentials**. Then sign in through the `postman-local` client and send the `access_token` as `Authorization: Bearer ...`; [docs/keycloak-setup.md](docs/keycloak-setup.md) walks through the Postman setup step by step. With a token in `$ACCESS_TOKEN`:
+
+```bash
+curl -i --request POST http://localhost:3000/api/v1/users \
+  --header "authorization: Bearer $ACCESS_TOKEN" \
+  --header 'content-type: application/json' \
+  --data '{"email":"ada@example.com","display_name":"Ada Lovelace"}'
+```
+
+The create call also queues a `user.created` background job; with `all` (or a separate `worker`) you will see it handled in the log.
+
+### 9. Run the checks
+
+```bash
+make check                  # fmt-check, clippy, and tests
+make test-postgres          # also runs the PostgreSQL queue tests against the Compose database
+```
+
+Without `TEST_DATABASE_URL`, the PostgreSQL tests return early; see [Checks](#checks).
+
+### 10. Make it yours
+
+- Replace the example `user.created` handler in `src/infrastructure/job/user_created_handler.rs` with a real, idempotent side effect.
+- Add features and domains by following [ARCHITECTURE.md](ARCHITECTURE.md) (*Adding a Feature to an Existing Domain* and *Adding a New Domain*).
+- Update this README's title and description and the metadata in `Cargo.toml`.
+- Treat every demo credential as local-only: the Compose passwords, Keycloak `admin` / `admin`, and the `postman-local` client. In production use a real identity provider with `OIDC_ALLOW_INSECURE_HTTP=false`, a privileged `MIGRATION_DATABASE_URL` that only the migration step uses, and secrets from a secret manager.
+
+### Troubleshooting
+
+| Symptom | Likely cause and fix |
+| --- | --- |
+| `could not connect to PostgreSQL` | Compose is not healthy yet, or `DATABASE_URL` does not match `compose.yaml` |
+| `http` or `all` fails while loading OIDC discovery or the JWKS | Keycloak is still starting, or `OIDC_ISSUER_URL` is not exactly the issuer the provider reports |
+| `401 unauthorized` on every call | Wrong audience, expired token, or an ID token instead of the access token |
+| `403 insufficient_scope` | The token lacks `users:read` or `users:write`; assign the scope and request a new token |
+| `address already in use` | Another process uses `APP_PORT` (3000); change it in `.env` |
+
 ## Run locally
 
 ```bash

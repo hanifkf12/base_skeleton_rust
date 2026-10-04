@@ -4,6 +4,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -25,11 +26,17 @@ pub struct Checkout {
 
 impl Checkout {
     pub fn fetch(source: Source<'_>) -> Result<Self> {
+        // The counter keeps concurrent checkouts in one process apart; the clock alone
+        // can repeat on coarse timers.
+        static NEXT: AtomicU64 = AtomicU64::new(0);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_nanos());
-        let directory =
-            std::env::temp_dir().join(format!("skeleton-new-{}-{nanos}", std::process::id()));
+        let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!(
+            "skeleton-new-{}-{sequence}-{nanos}",
+            std::process::id()
+        ));
         fs::create_dir(&directory)
             .with_context(|| format!("could not create {}", directory.display()))?;
         // From here on `Drop` removes the directory, including on every error path.

@@ -23,6 +23,7 @@ skeleton-new orders-api                       # creates ./orders-api
 skeleton-new orders-api --path ~/work         # creates ~/work/orders-api
 skeleton-new orders-api --branch v2           # a branch or tag instead of the default branch
 skeleton-new orders-api --repo git@github.com:me/skeleton.git
+skeleton-new help                             # usage and examples (same as --help); also shown with no arguments
 ```
 
 | Option | Env | Default |
@@ -51,7 +52,24 @@ with a letter, and must not be a Rust keyword or a name such as `std`/`core`/`te
 6. Runs `cargo fmt`, because a different name length changes line wrapping and import order.
 
 It prints the fetched commit (`<repo>@<short sha>`). It does not run `git init`, create a
-`.env`, or start any service.
+`.env`, or start any service; those are the developer's first steps.
+
+## After generating
+
+The generated project's `README.md` has a **First-time setup** section that walks through
+everything the developer does next: install the tools, `git init` and the first commit, review
+the derived names, create `.env`, start Docker Compose, apply migrations, run and check the
+service, create a Keycloak user and call the API, run the checks, and replace the demo parts.
+In short:
+
+```bash
+cd orders-api
+git init -b main && git add -A && git commit -m "chore: initial commit from skeleton"
+cp .env.example .env
+docker compose up -d
+cargo run -- db migrate
+cargo run -- all
+```
 
 ## Develop
 
