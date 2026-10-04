@@ -1,0 +1,17 @@
+[package]
+name = "skeleton-new"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+license = "MIT"
+publish = false
+description = "Generate a new service from the Rust/Axum clean-architecture skeleton hosted in git"
+
+# Standalone workspace: the skeleton one directory up is a different package
+# and must not pick this crate up (or the other way round).
+[workspace]
+
+[dependencies]
+aho-corasick = "1"
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
