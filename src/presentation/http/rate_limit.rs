@@ -25,6 +25,11 @@ impl TrustedProxyIpKeyExtractor {
             trusted_proxy_cidrs,
         }
     }
+    fn is_trusted(&self, ip: IpAddr) -> bool {
+        self.trusted_proxy_cidrs
+            .iter()
+            .any(|network| network.contains(&ip))
+    }
 }
 
 impl KeyExtractor for TrustedProxyIpKeyExtractor {
@@ -40,29 +45,26 @@ impl KeyExtractor for TrustedProxyIpKeyExtractor {
             // Router::oneshot tests deterministic.
             .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
 
-        if !self
-            .trusted_proxy_cidrs
-            .iter()
-            .any(|network| network.contains(&peer))
-        {
+        if !self.is_trusted(peer) {
             return Ok(peer);
         }
 
-        let Some(value) = request.headers().get("x-forwarded-for") else {
+        let Some(value) = request
+            .headers()
+            .get("x-forwarded-for")
+            .and_then(|value| value.to_str().ok())
+        else {
             return Ok(peer);
         };
-        let Ok(value) = value.to_str() else {
-            return Ok(peer);
-        };
-        let forwarded = value
-            .split(',')
-            .map(str::trim)
-            .map(str::parse::<IpAddr>)
-            .collect::<Result<Vec<_>, _>>();
-        match forwarded {
-            Ok(addresses) => Ok(addresses.first().copied().unwrap_or(peer)),
-            Err(_) => Ok(peer),
+        for entry in value.rsplit(',').map(str::trim) {
+            let Ok(ip) = entry.parse::<IpAddr>() else {
+                break;
+            };
+            if !self.is_trusted(ip) {
+                return Ok(ip);
+            }
         }
+        Ok(peer)
     }
 }
 
@@ -125,7 +127,10 @@ mod tests {
         let extractor = TrustedProxyIpKeyExtractor::new(vec!["10.0.0.0/8".parse().unwrap()]);
         assert_eq!(
             extractor
-                .extract(&request("10.1.2.3:1234", Some("203.0.113.7, 10.2.3.4")))
+                .extract(&request(
+                    "10.1.2.3:1234",
+                    Some("198.51.100.9, 203.0.113.7, 10.2.3.4")
+                ))
                 .unwrap(),
             "203.0.113.7".parse::<IpAddr>().unwrap()
         );
@@ -138,6 +143,12 @@ mod tests {
         assert_eq!(
             extractor
                 .extract(&request("10.1.2.3:1234", Some("bad, 203.0.113.7")))
+                .unwrap(),
+            "203.0.113.7".parse::<IpAddr>().unwrap()
+        );
+        assert_eq!(
+            extractor
+                .extract(&request("10.1.2.3:1234", Some("203.0.113.7, bad")))
                 .unwrap(),
             "10.1.2.3".parse::<IpAddr>().unwrap()
         );

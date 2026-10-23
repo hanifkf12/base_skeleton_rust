@@ -13,15 +13,15 @@ use base_skeleton_rust::{
         auth::{AccessTokenVerificationError, AccessTokenVerifier, AuthenticatedPrincipal},
         health::ReadinessCheck,
         user::{
-            CacheError, CreateUserUseCase, DeleteUserUseCase, GetUserUseCase, ListUsersUseCase,
+            CreateUserUseCase, DeleteUserUseCase, GetUserUseCase, ListUsersUseCase,
             RepositoryError, UpdateUserUseCase, UserCache, UserCreationJob,
             UserRegistrationRepository, UserRepository,
         },
     },
-    domain::user::{User, UserId},
+    domain::user::{DisplayName, Email, User, UserId},
+    infrastructure::cache::noop::NoOpUserCache,
     presentation::http::{AppState, RouterConfig, build_router},
 };
-use chrono::{DateTime, Utc};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -31,9 +31,8 @@ struct InMemoryUserRepository {
     users: Mutex<HashMap<UserId, User>>,
 }
 
-#[async_trait]
-impl UserRepository for InMemoryUserRepository {
-    async fn create(&self, user: &User) -> Result<User, RepositoryError> {
+impl InMemoryUserRepository {
+    fn insert(&self, user: &User) -> Result<User, RepositoryError> {
         let mut users = self.users.lock().unwrap();
         if users
             .values()
@@ -44,7 +43,10 @@ impl UserRepository for InMemoryUserRepository {
         users.insert(user.id(), user.clone());
         Ok(user.clone())
     }
+}
 
+#[async_trait]
+impl UserRepository for InMemoryUserRepository {
     async fn find_by_id(&self, id: UserId) -> Result<Option<User>, RepositoryError> {
         Ok(self.users.lock().unwrap().get(&id).cloned())
     }
@@ -63,18 +65,14 @@ impl UserRepository for InMemoryUserRepository {
 
     async fn update(
         &self,
-        user: &User,
-        expected_updated_at: &DateTime<Utc>,
+        id: UserId,
+        email: &Email,
+        display_name: &DisplayName,
     ) -> Result<User, RepositoryError> {
         let mut users = self.users.lock().unwrap();
-        match users.get(&user.id()) {
-            Some(existing) if existing.updated_at() == expected_updated_at => {
-                users.insert(user.id(), user.clone());
-                Ok(user.clone())
-            }
-            Some(_) => Err(RepositoryError::Conflict),
-            None => Err(RepositoryError::NotFound),
-        }
+        let existing = users.get_mut(&id).ok_or(RepositoryError::NotFound)?;
+        existing.update_profile(email.clone(), display_name.clone());
+        Ok(existing.clone())
     }
 
     async fn delete(&self, id: UserId) -> Result<bool, RepositoryError> {
@@ -89,27 +87,9 @@ impl UserRegistrationRepository for InMemoryUserRepository {
         user: &User,
         _job: &UserCreationJob,
     ) -> Result<User, RepositoryError> {
-        self.create(user).await
+        self.insert(user)
     }
 }
-
-struct NoOpCache;
-
-#[async_trait]
-impl UserCache for NoOpCache {
-    async fn get(&self, _id: UserId) -> Result<Option<User>, CacheError> {
-        Ok(None)
-    }
-
-    async fn set(&self, _user: &User, _ttl_seconds: u64) -> Result<(), CacheError> {
-        Ok(())
-    }
-
-    async fn delete(&self, _id: UserId) -> Result<(), CacheError> {
-        Ok(())
-    }
-}
-
 struct AlwaysReady;
 
 #[async_trait]
@@ -173,7 +153,7 @@ fn app_with_config(
     let in_memory_repository = Arc::new(InMemoryUserRepository::default());
     let registration_repository: Arc<dyn UserRegistrationRepository> = in_memory_repository.clone();
     let repository: Arc<dyn UserRepository> = in_memory_repository;
-    let cache: Arc<dyn UserCache> = Arc::new(NoOpCache);
+    let cache: Arc<dyn UserCache> = Arc::new(NoOpUserCache);
     let state = AppState {
         create_user: Arc::new(CreateUserUseCase::new(
             registration_repository,
@@ -258,6 +238,22 @@ async fn returns_the_standard_error_envelope_for_invalid_json() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = response_json(response).await;
     assert_eq!(body["error"]["code"], "invalid_json");
+
+    let missing_content_type = app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/users")
+                .header(header::AUTHORIZATION, "Bearer valid-token")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        missing_content_type.status(),
+        StatusCode::UNSUPPORTED_MEDIA_TYPE
+    );
 }
 
 #[tokio::test]
@@ -360,19 +356,22 @@ async fn metrics_route_is_disabled_or_requires_its_bearer_token() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
-    let response = enabled
-        .oneshot(
-            Request::builder()
-                .uri("/metrics")
-                .header(header::AUTHORIZATION, "Bearer scrape-secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    // The binary installs the exporter before building the router. This
-    // integration router deliberately does not initialize global telemetry.
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    for header_value in ["Bearer scrape-secret", "bearer scrape-secret"] {
+        let response = enabled
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .header(header::AUTHORIZATION, header_value)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // The binary installs the exporter before building the router. This
+        // integration router deliberately does not initialize global telemetry.
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
 }
 
 #[tokio::test]

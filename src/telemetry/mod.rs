@@ -26,7 +26,6 @@ use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::Subscribe
 
 use crate::application::job::ClaimedJob;
 use crate::application::job::JobTracer;
-use crate::application::user::TraceContextProvider;
 use crate::config::TelemetryConfig;
 
 pub struct TelemetryGuard {
@@ -93,9 +92,10 @@ pub fn init(config: &TelemetryConfig) -> Result<TelemetryGuard> {
         meter_builder = meter_builder.with_periodic_exporter(exporter);
     }
     let meter_provider = meter_builder.build();
-    global::set_meter_provider(meter_provider.clone());
-    initialize_metrics();
-
+    if prometheus_enabled || config.otlp_endpoint.is_some() {
+        global::set_meter_provider(meter_provider.clone());
+        initialize_metrics();
+    }
     let (tracer_provider, logger_provider) = if config.otlp_endpoint.is_some() {
         // Let the OTLP exporter read the generic endpoint from the environment.
         // It appends `/v1/traces` for `OTEL_EXPORTER_OTLP_ENDPOINT`, whereas a
@@ -319,14 +319,6 @@ impl Extractor for HeaderCarrier<'_> {
 
     fn keys(&self) -> Vec<&str> {
         self.0.keys().map(axum::http::HeaderName::as_str).collect()
-    }
-}
-
-pub struct OpenTelemetryTraceContext;
-
-impl TraceContextProvider for OpenTelemetryTraceContext {
-    fn current(&self) -> Value {
-        current_trace_context()
     }
 }
 

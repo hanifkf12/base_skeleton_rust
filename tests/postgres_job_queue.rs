@@ -8,11 +8,18 @@ use std::{
 
 use async_trait::async_trait;
 use base_skeleton_rust::{
-    application::job::{
-        ClaimedJob, JobDisposition, JobHandler, JobHandlerError, JobQueue, JobQueueError,
-        JobTracer, JobWorker, JobWorkerConfig, NewJob, RunOutcome,
+    application::{
+        health::ReadinessCheck,
+        job::{
+            ClaimedJob, JobDisposition, JobHandler, JobHandlerError, JobQueue, JobQueueError,
+            JobTracer, JobWorker, JobWorkerConfig, NewJob, RunOutcome, USER_CREATED_JOB,
+        },
+        user::{RepositoryError, UserCreationJob, UserRegistrationRepository, UserRepository},
     },
-    infrastructure::database::postgres::PostgresJobQueue,
+    domain::user::{DisplayName, Email, User},
+    infrastructure::database::postgres::{
+        PostgresJobQueue, PostgresReadinessCheck, PostgresUserRepository,
+    },
 };
 use serde_json::json;
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -649,5 +656,63 @@ async fn persistent_postgres_renewal_outage_cancels_handler_at_lease_expiry() {
     .await
     .unwrap();
     assert_eq!(state, ("running".to_owned(), 1, "test-worker".to_owned()));
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn exercises_postgres_user_repository_and_readiness_check() {
+    let Some(database) = TestDatabase::new().await else {
+        return;
+    };
+    let readiness = PostgresReadinessCheck::new(database.pool.clone());
+    assert!(readiness.is_ready().await);
+
+    // A newer migration applied during a rolling deploy must not break readiness of older nodes.
+    sqlx::query(
+        "INSERT INTO _sqlx_migrations (version, description, installed_on, success, checksum, execution_time)
+         VALUES (99999999999999, 'future migration', NOW(), true, '\\x00', 1)",
+    )
+    .execute(&database.pool)
+    .await
+    .unwrap();
+    assert!(readiness.is_ready().await);
+
+    let repository = PostgresUserRepository::new(database.pool.clone());
+    let user = User::new(
+        Email::parse("ada@example.com").unwrap(),
+        DisplayName::parse("Ada Lovelace").unwrap(),
+    );
+    let job = UserCreationJob {
+        job_type: USER_CREATED_JOB.to_owned(),
+        payload: json!({ "user_id": user.id().to_string() }),
+        max_attempts: 3,
+    };
+    let created = repository.create_with_job(&user, &job).await.unwrap();
+    assert_eq!(created.id(), user.id());
+    let duplicate = User::new(
+        Email::parse("ada@example.com").unwrap(),
+        DisplayName::parse("Ada Duplicate").unwrap(),
+    );
+    assert_eq!(
+        repository.create_with_job(&duplicate, &job).await,
+        Err(RepositoryError::DuplicateEmail)
+    );
+
+    let found = repository.find_by_id(user.id()).await.unwrap().unwrap();
+    assert_eq!(found.email().as_str(), "ada@example.com");
+
+    let updated = repository
+        .update(
+            user.id(),
+            &Email::parse("grace@example.com").unwrap(),
+            &DisplayName::parse("Grace Hopper").unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.email().as_str(), "grace@example.com");
+    assert_eq!(repository.list(10, 0).await.unwrap().len(), 1);
+    assert!(repository.delete(user.id()).await.unwrap());
+    assert!(!repository.delete(user.id()).await.unwrap());
+
     database.cleanup().await;
 }

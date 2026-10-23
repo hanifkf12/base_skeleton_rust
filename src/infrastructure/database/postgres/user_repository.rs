@@ -12,6 +12,7 @@ use crate::{
     telemetry::current_trace_context,
 };
 
+use super::job_queue::{insert_job, validate_max_attempts};
 pub struct PostgresUserRepository {
     pool: PgPool,
 }
@@ -53,23 +54,6 @@ impl UserRow {
 
 #[async_trait]
 impl UserRepository for PostgresUserRepository {
-    #[tracing::instrument(name = "infrastructure.postgres.user.create", skip(self, user), fields(db.system = "postgresql", user.id = %user.id()))]
-    async fn create(&self, user: &User) -> Result<User, RepositoryError> {
-        sqlx::query_as::<_, UserRow>(
-            r#"INSERT INTO users (id, email, display_name, created_at, updated_at)
-               VALUES ($1, $2, $3, $4, $5)
-               RETURNING id, email, display_name, created_at, updated_at"#,
-        )
-        .bind(user.id().as_uuid())
-        .bind(user.email().as_str())
-        .bind(user.display_name().as_str())
-        .bind(user.created_at())
-        .bind(user.updated_at())
-        .fetch_one(&self.pool)
-        .await?
-        .into_domain()
-    }
-
     #[tracing::instrument(name = "infrastructure.postgres.user.find", skip(self), fields(db.system = "postgresql", user.id = %id))]
     async fn find_by_id(&self, id: UserId) -> Result<Option<User>, RepositoryError> {
         sqlx::query_as::<_, UserRow>(
@@ -96,41 +80,26 @@ impl UserRepository for PostgresUserRepository {
         rows.into_iter().map(UserRow::into_domain).collect()
     }
 
-    #[tracing::instrument(name = "infrastructure.postgres.user.update", skip(self, user), fields(db.system = "postgresql", user.id = %user.id()))]
+    #[tracing::instrument(name = "infrastructure.postgres.user.update", skip(self, email, display_name), fields(db.system = "postgresql", user.id = %id))]
     async fn update(
         &self,
-        user: &User,
-        expected_updated_at: &DateTime<Utc>,
+        id: UserId,
+        email: &Email,
+        display_name: &DisplayName,
     ) -> Result<User, RepositoryError> {
-        let Some(updated) = sqlx::query_as::<_, UserRow>(
+        sqlx::query_as::<_, UserRow>(
             r#"UPDATE users SET email = $2, display_name = $3, updated_at = $4
-               WHERE id = $1 AND updated_at = $5
+               WHERE id = $1
                RETURNING id, email, display_name, created_at, updated_at"#,
         )
-        .bind(user.id().as_uuid())
-        .bind(user.email().as_str())
-        .bind(user.display_name().as_str())
-        .bind(user.updated_at())
-        .bind(expected_updated_at)
+        .bind(id.as_uuid())
+        .bind(email.as_str())
+        .bind(display_name.as_str())
+        .bind(Utc::now())
         .fetch_optional(&self.pool)
         .await?
-        .map(UserRow::into_domain)
-        .transpose()?
-        else {
-            // No row was updated: either the user is gone (NotFound) or its
-            // updated_at changed concurrently (Conflict).
-            let exists =
-                sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)")
-                    .bind(user.id().as_uuid())
-                    .fetch_one(&self.pool)
-                    .await?;
-            return if exists {
-                Err(RepositoryError::Conflict)
-            } else {
-                Err(RepositoryError::NotFound)
-            };
-        };
-        Ok(updated)
+        .ok_or(RepositoryError::NotFound)?
+        .into_domain()
     }
 
     #[tracing::instrument(name = "infrastructure.postgres.user.delete", skip(self), fields(db.system = "postgresql", user.id = %id))]
@@ -151,14 +120,8 @@ impl UserRegistrationRepository for PostgresUserRepository {
         user: &User,
         job: &UserCreationJob,
     ) -> Result<User, RepositoryError> {
-        let max_attempts = i32::try_from(job.max_attempts).map_err(|error| {
-            tracing::error!(%error, max_attempts = job.max_attempts, "max_attempts is too large");
-            RepositoryError::Unavailable
-        })?;
-        if max_attempts == 0 {
-            tracing::error!("max_attempts must be greater than zero");
-            return Err(RepositoryError::Unavailable);
-        }
+        let max_attempts =
+            validate_max_attempts(job.max_attempts).ok_or(RepositoryError::Unavailable)?;
 
         // The job subsystem owns the NewJob envelope; the adapter assembles it
         // and stamps the current W3C trace context captured from the request.
@@ -180,17 +143,7 @@ impl UserRegistrationRepository for PostgresUserRepository {
         .fetch_one(&mut *transaction)
         .await?;
 
-        sqlx::query(
-            r#"INSERT INTO background_jobs (id, job_type, payload, trace_context, max_attempts)
-               VALUES ($1, $2, $3, $4, $5)"#,
-        )
-        .bind(new_job.id)
-        .bind(&new_job.job_type)
-        .bind(&new_job.payload)
-        .bind(&new_job.trace_context)
-        .bind(max_attempts)
-        .execute(&mut *transaction)
-        .await?;
+        insert_job(&mut *transaction, &new_job, max_attempts).await?;
 
         transaction.commit().await?;
         created.into_domain()
@@ -201,7 +154,10 @@ impl From<sqlx::Error> for RepositoryError {
     fn from(error: sqlx::Error) -> Self {
         if let sqlx::Error::Database(database_error) = &error
             && database_error.is_unique_violation()
-            && database_error.constraint() == Some("users_email_unique")
+            && matches!(
+                database_error.constraint(),
+                Some("users_email_unique" | "users_email_key")
+            )
         {
             return RepositoryError::DuplicateEmail;
         }

@@ -93,7 +93,6 @@ Each action is represented by a concrete use-case struct with explicit dependenc
 pub struct CreateUserUseCase {
     repository: Arc<dyn UserRegistrationRepository>,
     cache: Arc<dyn UserCache>,
-    trace_context: Arc<dyn TraceContextProvider>,
     cache_ttl_seconds: u64,
     job_max_attempts: u32,
 }

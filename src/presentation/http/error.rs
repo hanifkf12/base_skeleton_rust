@@ -90,7 +90,7 @@ impl ApiError {
 
 impl From<JsonRejection> for ApiError {
     fn from(error: JsonRejection) -> Self {
-        Self::without_challenge(StatusCode::BAD_REQUEST, "invalid_json", error.body_text())
+        Self::without_challenge(error.status(), "invalid_json", error.body_text())
     }
 }
 
@@ -108,7 +108,6 @@ impl From<ApplicationError> for ApiError {
             }
             ApplicationError::NotFound => (StatusCode::NOT_FOUND, "user_not_found"),
             ApplicationError::EmailAlreadyExists => (StatusCode::CONFLICT, "email_already_exists"),
-            ApplicationError::Conflict => (StatusCode::CONFLICT, "conflict"),
             ApplicationError::DependencyUnavailable => {
                 (StatusCode::SERVICE_UNAVAILABLE, "service_unavailable")
             }

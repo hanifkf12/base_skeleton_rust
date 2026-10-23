@@ -64,9 +64,14 @@ async fn build_cache(config: &Config) -> Result<Arc<dyn UserCache>> {
     };
 
     let client = Client::open(redis_url).context("REDIS_URL is invalid")?;
+    let timeout = Duration::from_secs(config.redis_connect_timeout_seconds);
+    let manager_config = redis::aio::ConnectionManagerConfig::new()
+        .set_connection_timeout(timeout)
+        .set_response_timeout(timeout)
+        .set_number_of_retries(1);
     let connection = tokio::time::timeout(
-        Duration::from_secs(config.redis_connect_timeout_seconds),
-        client.get_connection_manager(),
+        timeout,
+        client.get_connection_manager_with_config(manager_config),
     )
     .await;
 

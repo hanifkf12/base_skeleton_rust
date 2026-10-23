@@ -52,12 +52,13 @@ impl Email {
         if local.is_empty()
             || domain.is_empty()
             || !domain.contains('.')
+            || domain.contains('@')
+            || domain.split('.').any(str::is_empty)
             || normalized.len() > 254
             || normalized.chars().any(char::is_whitespace)
         {
             return Err(UserError::InvalidEmail);
         }
-
         Ok(Self(normalized))
     }
 
@@ -96,7 +97,16 @@ mod tests {
 
     #[test]
     fn rejects_invalid_value_objects() {
-        assert_eq!(Email::parse("not-an-email"), Err(UserError::InvalidEmail));
+        for invalid in [
+            "not-an-email",
+            "a@.",
+            "a@.com",
+            "a@com.",
+            "a@..com",
+            "a@b@c.com",
+        ] {
+            assert_eq!(Email::parse(invalid), Err(UserError::InvalidEmail));
+        }
         assert_eq!(DisplayName::parse("x"), Err(UserError::InvalidDisplayName));
     }
 }

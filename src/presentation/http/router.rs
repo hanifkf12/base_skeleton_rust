@@ -78,6 +78,17 @@ pub fn build_router(
     let governor = governor_builder
         .finish()
         .expect("validated rate limit configuration is non-zero");
+    let limiter = governor.limiter().clone();
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                limiter.retain_recent();
+                limiter.shrink_to_fit();
+            }
+        });
+    }
     let api = Router::new()
         .merge(read_api)
         .merge(write_api)
@@ -127,23 +138,27 @@ pub fn build_router(
 }
 
 async fn record_http_metrics(request: axum::http::Request<Body>, next: Next) -> Response {
-    let method = request.method().as_str().to_owned();
+    let method = request.method().clone();
     // The router inserts `MatchedPath` before this layer runs, so the route
     // label comes from the routing table rather than a hand-kept path list.
     // Cloning is an `Arc` clone, and the clone must outlive the move below.
     let matched = request.extensions().get::<MatchedPath>().cloned();
     let route = matched.as_ref().map_or("unmatched", MatchedPath::as_str);
-    crate::telemetry::http_request_started(&method, route);
+    crate::telemetry::http_request_started(method.as_str(), route);
     let started = Instant::now();
     let response = next.run(request).await;
     crate::telemetry::http_request_finished(
-        &method,
+        method.as_str(),
         route,
         response.status().as_u16(),
         started.elapsed(),
     );
     if response.extensions().get::<RateLimitRejection>().is_some() {
-        crate::telemetry::record_rate_limit_rejection(&method, route, response.status().as_u16());
+        crate::telemetry::record_rate_limit_rejection(
+            method.as_str(),
+            route,
+            response.status().as_u16(),
+        );
     }
     response
 }

@@ -59,18 +59,9 @@ struct StatusRow {
 #[async_trait]
 impl JobQueue for PostgresJobQueue {
     async fn enqueue(&self, job: &NewJob) -> Result<(), JobQueueError> {
-        let max_attempts = max_attempts(job.max_attempts)?;
-        sqlx::query(
-            r#"INSERT INTO background_jobs (id, job_type, payload, trace_context, max_attempts)
-               VALUES ($1, $2, $3, $4, $5)"#,
-        )
-        .bind(job.id)
-        .bind(&job.job_type)
-        .bind(&job.payload)
-        .bind(&job.trace_context)
-        .bind(max_attempts)
-        .execute(&self.pool)
-        .await?;
+        let max_attempts =
+            validate_max_attempts(job.max_attempts).ok_or(JobQueueError::Unavailable)?;
+        insert_job(&self.pool, job, max_attempts).await?;
         Ok(())
     }
 
@@ -80,7 +71,6 @@ impl JobQueue for PostgresJobQueue {
         lease_timeout: Duration,
     ) -> Result<Option<ClaimedJob>, JobQueueError> {
         let lease_seconds = duration_seconds(lease_timeout);
-        let mut transaction = self.pool.begin().await?;
 
         // Requeue abandoned work. A job whose attempt budget was exhausted is
         // dead-lettered instead, so it cannot remain in `running` forever.
@@ -107,7 +97,7 @@ impl JobQueue for PostgresJobQueue {
                WHERE jobs.id = expired.id"#,
         )
         .bind(lease_seconds)
-        .execute(&mut *transaction)
+        .execute(&self.pool)
         .await?;
 
         let claimed = sqlx::query_as::<_, ClaimedJobRow>(
@@ -133,10 +123,9 @@ impl JobQueue for PostgresJobQueue {
                          jobs.attempts, jobs.max_attempts"#,
         )
         .bind(worker_id)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&self.pool)
         .await?;
 
-        transaction.commit().await?;
         claimed.map(ClaimedJobRow::into_application).transpose()
     }
 
@@ -246,7 +235,6 @@ impl JobQueue for PostgresJobQueue {
                           AND completed_at < NOW() - ($1 * INTERVAL '1 second'))
                       OR (status = 'dead'
                           AND updated_at < NOW() - ($2 * INTERVAL '1 second'))
-                   ORDER BY updated_at, id
                    FOR UPDATE SKIP LOCKED
                    LIMIT $3
                )
@@ -262,15 +250,40 @@ impl JobQueue for PostgresJobQueue {
     }
 }
 
-fn max_attempts(value: u32) -> Result<i32, JobQueueError> {
+pub(crate) fn validate_max_attempts(value: u32) -> Option<i32> {
     if value == 0 {
         tracing::error!("max_attempts must be greater than zero");
-        return Err(JobQueueError::Unavailable);
+        return None;
     }
-    i32::try_from(value).map_err(|error| {
-        tracing::error!(%error, max_attempts = value, "max_attempts is too large");
-        JobQueueError::Unavailable
-    })
+    match i32::try_from(value) {
+        Ok(max_attempts) => Some(max_attempts),
+        Err(error) => {
+            tracing::error!(%error, max_attempts = value, "max_attempts is too large");
+            None
+        }
+    }
+}
+
+pub(crate) async fn insert_job<'e, E>(
+    executor: E,
+    job: &NewJob,
+    max_attempts: i32,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    sqlx::query(
+        r#"INSERT INTO background_jobs (id, job_type, payload, trace_context, max_attempts)
+           VALUES ($1, $2, $3, $4, $5)"#,
+    )
+    .bind(job.id)
+    .bind(&job.job_type)
+    .bind(&job.payload)
+    .bind(&job.trace_context)
+    .bind(max_attempts)
+    .execute(executor)
+    .await?;
+    Ok(())
 }
 
 fn duration_seconds(duration: Duration) -> f64 {

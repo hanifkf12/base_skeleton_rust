@@ -29,17 +29,9 @@ impl UpdateUserUseCase {
         id: UserId,
         input: UpdateUserInput,
     ) -> Result<User, ApplicationError> {
-        let mut user = self
-            .repository
-            .find_by_id(id)
-            .await?
-            .ok_or(ApplicationError::NotFound)?;
-        let expected_updated_at = *user.updated_at();
-        user.update_profile(
-            Email::parse(input.email)?,
-            DisplayName::parse(input.display_name)?,
-        );
-        let updated = self.repository.update(&user, &expected_updated_at).await?;
+        let email = Email::parse(input.email)?;
+        let display_name = DisplayName::parse(input.display_name)?;
+        let updated = self.repository.update(id, &email, &display_name).await?;
         if let Err(e) = self.cache.set(&updated, self.cache_ttl_seconds).await {
             tracing::warn!(error = %e, user.id = %updated.id(), "failed to write updated user to cache – attempting invalidate");
             let _ = self.cache.delete(updated.id()).await;
