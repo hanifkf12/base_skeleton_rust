@@ -689,8 +689,12 @@ async fn exercises_postgres_user_repository_and_readiness_check() {
     };
     let created = repository.create_with_job(&user, &job).await.unwrap();
     assert_eq!(created.id(), user.id());
+    let duplicate = User::new(
+        Email::parse("ada@example.com").unwrap(),
+        DisplayName::parse("Ada Duplicate").unwrap(),
+    );
     assert_eq!(
-        repository.create_with_job(&user, &job).await,
+        repository.create_with_job(&duplicate, &job).await,
         Err(RepositoryError::DuplicateEmail)
     );
 
