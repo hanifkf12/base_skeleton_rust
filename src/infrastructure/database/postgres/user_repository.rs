@@ -154,7 +154,10 @@ impl From<sqlx::Error> for RepositoryError {
     fn from(error: sqlx::Error) -> Self {
         if let sqlx::Error::Database(database_error) = &error
             && database_error.is_unique_violation()
-            && database_error.constraint() == Some("users_email_unique")
+            && matches!(
+                database_error.constraint(),
+                Some("users_email_unique" | "users_email_key")
+            )
         {
             return RepositoryError::DuplicateEmail;
         }
