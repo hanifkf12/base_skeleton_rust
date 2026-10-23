@@ -89,8 +89,7 @@ fn split_all_mode_connections(total: u32) -> Result<(u32, u32)> {
         total >= 2,
         "all mode requires DATABASE_MAX_CONNECTIONS to be at least 2 so HTTP and worker each receive a connection"
     );
-    let http = total / 2;
-    Ok((http, total - http))
+    Ok((total - 1, 1))
 }
 
 #[cfg(test)]
@@ -101,7 +100,7 @@ mod tests {
     fn all_mode_requires_and_splits_connections() {
         assert!(split_all_mode_connections(1).is_err());
         assert_eq!(split_all_mode_connections(2).unwrap(), (1, 1));
-        assert_eq!(split_all_mode_connections(5).unwrap(), (2, 3));
-        assert_eq!(split_all_mode_connections(6).unwrap(), (3, 3));
+        assert_eq!(split_all_mode_connections(5).unwrap(), (4, 1));
+        assert_eq!(split_all_mode_connections(10).unwrap(), (9, 1));
     }
 }

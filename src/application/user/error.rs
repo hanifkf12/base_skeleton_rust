@@ -12,8 +12,6 @@ pub enum ApplicationError {
     NotFound,
     #[error("a user with this email already exists")]
     EmailAlreadyExists,
-    #[error("the user was modified by another operation")]
-    Conflict,
     #[error("a required dependency is unavailable")]
     DependencyUnavailable,
 }
@@ -22,7 +20,6 @@ impl From<RepositoryError> for ApplicationError {
     fn from(error: RepositoryError) -> Self {
         match error {
             RepositoryError::DuplicateEmail => Self::EmailAlreadyExists,
-            RepositoryError::Conflict => Self::Conflict,
             RepositoryError::NotFound => Self::NotFound,
             RepositoryError::Unavailable => Self::DependencyUnavailable,
         }

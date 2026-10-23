@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -7,21 +7,15 @@ use std::{
 
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
-use sqlx::{FromRow, postgres::PgPoolOptions};
+use sqlx::postgres::PgPoolOptions;
 
 use crate::{
     cli::DatabaseCommand,
     config::Config,
-    infrastructure::database::postgres::migrations::{MIGRATOR, migration_table_exists},
+    infrastructure::database::postgres::migrations::{
+        MIGRATOR, load_applied_migrations, migration_table_exists,
+    },
 };
-
-#[derive(FromRow)]
-struct AppliedMigrationRow {
-    version: i64,
-    success: bool,
-    checksum: Vec<u8>,
-}
-
 pub async fn run(command: DatabaseCommand) -> Result<()> {
     match command {
         DatabaseCommand::Migrate => migrate().await,
@@ -152,22 +146,7 @@ pub async fn migrate() -> Result<()> {
 
 async fn info() -> Result<()> {
     let pool = connect().await?;
-    let table_exists = migration_table_exists(&pool).await?;
-
-    let applied = if table_exists {
-        sqlx::query_as::<_, AppliedMigrationRow>(
-            "SELECT version, success, checksum FROM _sqlx_migrations ORDER BY version",
-        )
-        .fetch_all(&pool)
-        .await
-        .context("could not read applied PostgreSQL migrations")?
-        .into_iter()
-        .map(|migration| (migration.version, migration))
-        .collect::<HashMap<_, _>>()
-    } else {
-        HashMap::new()
-    };
-
+    let applied = load_applied_migrations(&pool).await?;
     println!("VERSION\tSTATUS\tDESCRIPTION");
     let mut invalid = false;
     let known_versions = MIGRATOR

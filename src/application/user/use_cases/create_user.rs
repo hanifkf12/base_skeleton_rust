@@ -3,14 +3,11 @@ use std::sync::Arc;
 use serde_json::json;
 
 use crate::{
-    application::user::UserCreationJob,
+    application::{job::USER_CREATED_JOB, user::UserCreationJob},
     domain::user::{DisplayName, Email, User},
 };
 
 use super::super::{ApplicationError, CreateUserInput, UserCache, UserRegistrationRepository};
-
-const USER_CREATED_JOB: &str = "user.created";
-
 pub struct CreateUserUseCase {
     repository: Arc<dyn UserRegistrationRepository>,
     cache: Arc<dyn UserCache>,

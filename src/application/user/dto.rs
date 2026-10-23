@@ -1,14 +1,11 @@
 #[derive(Debug, Clone)]
-pub struct CreateUserInput {
+pub struct UserInput {
     pub email: String,
     pub display_name: String,
 }
 
-#[derive(Debug, Clone)]
-pub struct UpdateUserInput {
-    pub email: String,
-    pub display_name: String,
-}
+pub type CreateUserInput = UserInput;
+pub type UpdateUserInput = UserInput;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ListUsersInput {

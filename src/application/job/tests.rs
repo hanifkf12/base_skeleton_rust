@@ -1,14 +1,13 @@
 use std::{
     collections::VecDeque,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
 };
 
 use async_trait::async_trait;
-use parking_lot::Mutex;
 use serde_json::json;
 use tokio::time::Instant;
 use tracing::Span;
@@ -73,7 +72,7 @@ impl FakeQueue {
 #[async_trait]
 impl JobQueue for FakeQueue {
     async fn enqueue(&self, job: &NewJob) -> Result<(), JobQueueError> {
-        self.entries.lock().push_back(Entry {
+        self.entries.lock().unwrap().push_back(Entry {
             job: ClaimedJob {
                 id: job.id,
                 job_type: job.job_type.clone(),
@@ -96,7 +95,7 @@ impl JobQueue for FakeQueue {
         worker_id: &str,
         lease_timeout: Duration,
     ) -> Result<Option<ClaimedJob>, JobQueueError> {
-        let mut entries = self.entries.lock();
+        let mut entries = self.entries.lock().unwrap();
         for entry in entries.iter_mut() {
             if entry.status == "running" && entry.expires <= Instant::now() {
                 entry.status = if entry.job.attempts >= entry.job.max_attempts {
@@ -118,7 +117,7 @@ impl JobQueue for FakeQueue {
     }
 
     async fn complete(&self, id: Uuid, worker: &str, attempt: u32) -> Result<(), JobQueueError> {
-        let mut entries = self.entries.lock();
+        let mut entries = self.entries.lock().unwrap();
         let entry = entries
             .iter_mut()
             .find(|entry| Self::owned(entry, id, worker, attempt))
@@ -134,14 +133,14 @@ impl JobQueue for FakeQueue {
             Renewal::Unavailable => Err(JobQueueError::Unavailable),
             Renewal::FailsOnce if call == 0 => Err(JobQueueError::Unavailable),
             Renewal::Lost => {
-                let mut entries = self.entries.lock();
+                let mut entries = self.entries.lock().unwrap();
                 let entry = entries.iter_mut().find(|entry| entry.job.id == id).unwrap();
                 // Simulate reclaim by another incarnation with the same worker ID.
                 entry.job.attempts += 1;
                 Err(JobQueueError::LeaseLost)
             }
             Renewal::Healthy | Renewal::FailsOnce => {
-                let mut entries = self.entries.lock();
+                let mut entries = self.entries.lock().unwrap();
                 let entry = entries
                     .iter_mut()
                     .find(|entry| Self::owned(entry, id, worker, attempt))
@@ -160,7 +159,7 @@ impl JobQueue for FakeQueue {
         _error: &str,
         retry_delay: Duration,
     ) -> Result<JobDisposition, JobQueueError> {
-        let mut entries = self.entries.lock();
+        let mut entries = self.entries.lock().unwrap();
         let entry = entries
             .iter_mut()
             .find(|entry| Self::owned(entry, id, worker, attempt))
@@ -255,7 +254,7 @@ async fn completes_a_job_with_a_registered_handler() {
     ));
     let worker = worker(queue.clone(), vec![Arc::new(SuccessfulHandler)]);
     assert_eq!(worker.run_once().await.unwrap(), RunOutcome::Completed);
-    assert_eq!(queue.entries.lock()[0].status, "completed");
+    assert_eq!(queue.entries.lock().unwrap()[0].status, "completed");
     assert!(
         queue
             .claim("other-worker", Duration::from_secs(9))
@@ -273,7 +272,7 @@ async fn retries_an_unknown_job_with_exponential_backoff() {
     ));
     let worker = worker(queue.clone(), Vec::new());
     assert_eq!(worker.run_once().await.unwrap(), RunOutcome::RetryScheduled);
-    assert_eq!(queue.entries.lock()[0].status, "pending");
+    assert_eq!(queue.entries.lock().unwrap()[0].status, "pending");
     tokio::time::advance(Duration::from_secs(19)).await;
     assert!(
         queue
@@ -324,7 +323,7 @@ async fn heartbeat_keeps_a_long_handler_owned() {
     tokio::time::advance(Duration::from_secs(1)).await;
     assert_eq!(execution.await.unwrap().unwrap(), RunOutcome::Completed);
     assert_eq!(effects.load(Ordering::SeqCst), 1);
-    let entries = queue.entries.lock();
+    let entries = queue.entries.lock().unwrap();
     assert_eq!(entries[0].status, "completed");
     assert_eq!(entries[0].job.attempts, 1);
 }
@@ -353,7 +352,7 @@ async fn renewal_failures_cancel_the_handler_without_terminal_writes() {
         assert!(started.elapsed() <= Duration::from_secs(9));
         tokio::time::advance(Duration::from_secs(60)).await;
         assert_eq!(effects.load(Ordering::SeqCst), 0);
-        let entries = queue.entries.lock();
+        let entries = queue.entries.lock().unwrap();
         assert_eq!(entries[0].status, "running");
         assert_eq!(entries[0].job.attempts, attempts);
     }
@@ -376,7 +375,7 @@ async fn transient_renewal_failure_is_retried_within_the_lease() {
     assert_eq!(worker.run_once().await.unwrap(), RunOutcome::Completed);
     assert_eq!(effects.load(Ordering::SeqCst), 1);
     assert_eq!(queue.renewals.load(Ordering::SeqCst), 2);
-    assert_eq!(queue.entries.lock()[0].status, "completed");
+    assert_eq!(queue.entries.lock().unwrap()[0].status, "completed");
 }
 #[tokio::test(start_paused = true)]
 async fn handler_finishing_during_a_stalled_renewal_does_not_complete_the_job() {
@@ -401,5 +400,5 @@ async fn handler_finishing_during_a_stalled_renewal_does_not_complete_the_job() 
     // An effect committed before lease loss is not reversible; only the stale
     // terminal write is prevented after renewal fails to establish ownership.
     assert_eq!(effects.load(Ordering::SeqCst), 1);
-    assert_eq!(queue.entries.lock()[0].status, "running");
+    assert_eq!(queue.entries.lock().unwrap()[0].status, "running");
 }

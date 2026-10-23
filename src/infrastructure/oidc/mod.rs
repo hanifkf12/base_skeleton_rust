@@ -76,7 +76,6 @@ impl CachedKeys {
 struct RefreshState {
     last_attempt: Option<Instant>,
 }
-
 impl OidcAccessTokenVerifier {
     pub async fn discover(config: &OidcConfig) -> Result<Arc<Self>> {
         config.validate()?;
@@ -150,15 +149,17 @@ impl OidcAccessTokenVerifier {
         }
 
         let mut refresh = self.refresh.lock().await;
-        {
+        let cache_is_stale = {
             let keys = self.keys.read().await;
-            if keys.fetched_at.elapsed() < self.jwks_max_age
-                && let Some(key) = keys.key(kid, algorithm)
-            {
-                return Ok(key);
+            if keys.fetched_at.elapsed() < self.jwks_max_age {
+                if let Some(key) = keys.key(kid, algorithm) {
+                    return Ok(key);
+                }
+                false
+            } else {
+                true
             }
-        }
-        let cache_is_stale = self.keys.read().await.fetched_at.elapsed() >= self.jwks_max_age;
+        };
         if refresh
             .last_attempt
             .is_some_and(|last_attempt| last_attempt.elapsed() < self.refresh_interval)
@@ -213,8 +214,6 @@ impl AccessTokenVerifier for OidcAccessTokenVerifier {
             .as_deref()
             .filter(|kid| !kid.is_empty())
             .ok_or(AccessTokenVerificationError::InvalidToken)?;
-        let decoding_key = self.key_for(kid, header.alg).await?;
-
         let mut validation = Validation::new(header.alg);
         validation.leeway = self.clock_skew_seconds;
         validation.validate_nbf = true;
@@ -222,21 +221,26 @@ impl AccessTokenVerifier for OidcAccessTokenVerifier {
         validation.set_issuer(&[&self.issuer]);
         validation.set_required_spec_claims(&["exp", "iat", "iss", "aud", "sub"]);
 
-        let token = decode::<AccessTokenClaims>(access_token, &decoding_key, &validation)
-            .map_err(AccessTokenVerificationError::from)?;
-        if token.claims.sub.trim().is_empty() {
-            return Err(AccessTokenVerificationError::InvalidToken);
-        }
+        let mut precheck = validation.clone();
+        precheck.insecure_disable_signature_validation();
+        let unverified =
+            decode::<AccessTokenClaims>(access_token, &DecodingKey::from_secret(&[]), &precheck)
+                .map_err(AccessTokenVerificationError::from)?;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| AccessTokenVerificationError::AuthenticationUnavailable)?
             .as_secs();
-        if token.claims.iat > now.saturating_add(self.clock_skew_seconds)
-            || token.claims.exp < token.claims.iat
-            || token.claims.exp - token.claims.iat > self.max_token_lifetime_seconds
+        if unverified.claims.sub.trim().is_empty()
+            || unverified.claims.iat > now.saturating_add(self.clock_skew_seconds)
+            || unverified.claims.exp < unverified.claims.iat
+            || unverified.claims.exp - unverified.claims.iat > self.max_token_lifetime_seconds
         {
             return Err(AccessTokenVerificationError::InvalidToken);
         }
+
+        let decoding_key = self.key_for(kid, header.alg).await?;
+        let token = decode::<AccessTokenClaims>(access_token, &decoding_key, &validation)
+            .map_err(AccessTokenVerificationError::from)?;
         let scopes = token
             .claims
             .scope

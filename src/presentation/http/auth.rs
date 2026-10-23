@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     extract::{FromRequestParts, Request, State},
-    http::{header, request::Parts},
+    http::{HeaderMap, header, request::Parts},
     middleware::Next,
     response::Response,
 };
@@ -45,7 +45,7 @@ pub async fn require_scope(
     mut request: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
-    let access_token = bearer_token(&request).ok_or_else(ApiError::unauthorized)?;
+    let access_token = bearer_token(request.headers()).ok_or_else(ApiError::unauthorized)?;
     let principal =
         requirement
             .verifier
@@ -66,12 +66,8 @@ pub async fn require_scope(
     Ok(next.run(request).await)
 }
 
-fn bearer_token(request: &Request) -> Option<&str> {
-    let value = request
-        .headers()
-        .get(header::AUTHORIZATION)?
-        .to_str()
-        .ok()?;
+pub(crate) fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let (scheme, token) = value.split_once(' ')?;
     if !scheme.eq_ignore_ascii_case("Bearer")
         || token.is_empty()
@@ -96,14 +92,14 @@ mod tests {
             .header(header::AUTHORIZATION, "bearer token-value")
             .body(Body::empty())
             .unwrap();
-        assert_eq!(bearer_token(&request), Some("token-value"));
+        assert_eq!(bearer_token(request.headers()), Some("token-value"));
 
         for value in ["Basic abc", "Bearer", "Bearer ", "Bearer one two"] {
             let request = Request::builder()
                 .header(header::AUTHORIZATION, value)
                 .body(Body::empty())
                 .unwrap();
-            assert_eq!(bearer_token(&request), None);
+            assert_eq!(bearer_token(request.headers()), None);
         }
     }
 

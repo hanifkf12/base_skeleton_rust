@@ -1,30 +1,18 @@
 use serde::Deserialize;
 
-use crate::application::user::{CreateUserInput, ListUsersInput, UpdateUserInput};
+use crate::application::user::{ListUsersInput, UserInput};
 
 #[derive(Deserialize)]
-pub struct CreateUserRequest {
+pub struct UserRequest {
     pub email: String,
     pub display_name: String,
 }
 
-impl From<CreateUserRequest> for CreateUserInput {
-    fn from(value: CreateUserRequest) -> Self {
-        Self {
-            email: value.email,
-            display_name: value.display_name,
-        }
-    }
-}
+pub type CreateUserRequest = UserRequest;
+pub type UpdateUserRequest = UserRequest;
 
-#[derive(Deserialize)]
-pub struct UpdateUserRequest {
-    pub email: String,
-    pub display_name: String,
-}
-
-impl From<UpdateUserRequest> for UpdateUserInput {
-    fn from(value: UpdateUserRequest) -> Self {
+impl From<UserRequest> for UserInput {
+    fn from(value: UserRequest) -> Self {
         Self {
             email: value.email,
             display_name: value.display_name,

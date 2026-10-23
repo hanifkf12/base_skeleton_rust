@@ -7,6 +7,7 @@ use axum::{
 };
 use subtle::ConstantTimeEq;
 
+use super::auth::bearer_token;
 #[derive(Clone)]
 struct MetricsState {
     token: String,
@@ -22,10 +23,7 @@ pub fn router(token: Option<String>) -> Router {
 }
 
 async fn metrics(State(state): State<MetricsState>, headers: HeaderMap) -> Response {
-    let authorized = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
+    let authorized = bearer_token(&headers)
         .is_some_and(|candidate| candidate.as_bytes().ct_eq(state.token.as_bytes()).into());
     if !authorized {
         return StatusCode::UNAUTHORIZED.into_response();

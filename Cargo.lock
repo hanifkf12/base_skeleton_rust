@@ -214,7 +214,6 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry-prometheus-text-exporter",
  "opentelemetry_sdk",
- "parking_lot",
  "redis",
  "reqwest",
  "serde",

@@ -4,7 +4,6 @@ use std::{
 };
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 
 use crate::domain::user::{DisplayName, Email, User, UserId};
 
@@ -20,22 +19,8 @@ struct FakeUserRepository {
     jobs: Mutex<Vec<UserCreationJob>>,
 }
 
-#[async_trait]
-impl UserRegistrationRepository for FakeUserRepository {
-    async fn create_with_job(
-        &self,
-        user: &User,
-        job: &UserCreationJob,
-    ) -> Result<User, RepositoryError> {
-        let created = self.create(user).await?;
-        self.jobs.lock().unwrap().push(job.clone());
-        Ok(created)
-    }
-}
-
-#[async_trait]
-impl UserRepository for FakeUserRepository {
-    async fn create(&self, user: &User) -> Result<User, RepositoryError> {
+impl FakeUserRepository {
+    fn insert(&self, user: &User) -> Result<User, RepositoryError> {
         let mut users = self.users.lock().unwrap();
         if users
             .values()
@@ -46,7 +31,23 @@ impl UserRepository for FakeUserRepository {
         users.insert(user.id(), user.clone());
         Ok(user.clone())
     }
+}
 
+#[async_trait]
+impl UserRegistrationRepository for FakeUserRepository {
+    async fn create_with_job(
+        &self,
+        user: &User,
+        job: &UserCreationJob,
+    ) -> Result<User, RepositoryError> {
+        let created = self.insert(user)?;
+        self.jobs.lock().unwrap().push(job.clone());
+        Ok(created)
+    }
+}
+
+#[async_trait]
+impl UserRepository for FakeUserRepository {
     async fn find_by_id(&self, id: UserId) -> Result<Option<User>, RepositoryError> {
         Ok(self.users.lock().unwrap().get(&id).cloned())
     }
@@ -65,18 +66,14 @@ impl UserRepository for FakeUserRepository {
 
     async fn update(
         &self,
-        user: &User,
-        expected_updated_at: &DateTime<Utc>,
+        id: UserId,
+        email: &Email,
+        display_name: &DisplayName,
     ) -> Result<User, RepositoryError> {
         let mut users = self.users.lock().unwrap();
-        match users.get(&user.id()) {
-            Some(existing) if existing.updated_at() == expected_updated_at => {
-                users.insert(user.id(), user.clone());
-                Ok(user.clone())
-            }
-            Some(_) => Err(RepositoryError::Conflict),
-            None => Err(RepositoryError::NotFound),
-        }
+        let existing = users.get_mut(&id).ok_or(RepositoryError::NotFound)?;
+        existing.update_profile(email.clone(), display_name.clone());
+        Ok(existing.clone())
     }
 
     async fn delete(&self, id: UserId) -> Result<bool, RepositoryError> {
@@ -136,7 +133,7 @@ async fn get_user_falls_back_to_repository_and_warms_cache() {
         Email::parse("grace@example.com").unwrap(),
         DisplayName::parse("Grace Hopper").unwrap(),
     );
-    repository.create(&user).await.unwrap();
+    repository.insert(&user).unwrap();
     let use_case = GetUserUseCase::new(repository, cache.clone(), 60);
 
     let found = use_case.execute(user.id()).await.unwrap();
@@ -153,7 +150,7 @@ async fn update_user_replaces_profile_and_warms_cache() {
         Email::parse("old@example.com").unwrap(),
         DisplayName::parse("Old Name").unwrap(),
     );
-    repository.create(&user).await.unwrap();
+    repository.insert(&user).unwrap();
     let use_case = UpdateUserUseCase::new(repository.clone(), cache.clone(), 60);
 
     let updated = use_case
@@ -192,30 +189,6 @@ async fn update_user_returns_not_found_for_missing_user() {
 }
 
 #[tokio::test]
-async fn update_user_returns_conflict_on_concurrent_modification() {
-    let repository = Arc::new(StaleReadRepository::default());
-    let cache = Arc::new(FakeUserCache::default());
-    let user = User::new(
-        Email::parse("ada@example.com").unwrap(),
-        DisplayName::parse("Ada Lovelace").unwrap(),
-    );
-    repository.seed(user.clone());
-    let use_case = UpdateUserUseCase::new(repository, cache, 60);
-
-    let result = use_case
-        .execute(
-            user.id(),
-            UpdateUserInput {
-                email: "new@example.com".to_owned(),
-                display_name: "New Name".to_owned(),
-            },
-        )
-        .await;
-
-    assert!(matches!(result, Err(ApplicationError::Conflict)));
-}
-
-#[tokio::test]
 async fn delete_user_removes_user_and_cache_entry() {
     let repository = Arc::new(FakeUserRepository::default());
     let cache = Arc::new(FakeUserCache::default());
@@ -223,7 +196,7 @@ async fn delete_user_removes_user_and_cache_entry() {
         Email::parse("grace@example.com").unwrap(),
         DisplayName::parse("Grace Hopper").unwrap(),
     );
-    repository.create(&user).await.unwrap();
+    repository.insert(&user).unwrap();
     cache.set(&user, 60).await.unwrap();
     let use_case = DeleteUserUseCase::new(repository.clone(), cache.clone());
 
@@ -252,7 +225,7 @@ async fn list_users_returns_paginated_results() {
             Email::parse(format!("user{i}@example.com")).unwrap(),
             DisplayName::parse(format!("User {i}")).unwrap(),
         );
-        repository.create(&user).await.unwrap();
+        repository.insert(&user).unwrap();
     }
     let use_case = ListUsersUseCase::new(repository);
 
@@ -299,7 +272,7 @@ async fn update_user_invalidates_cache_when_set_fails() {
         Email::parse("ada@example.com").unwrap(),
         DisplayName::parse("Ada Lovelace").unwrap(),
     );
-    repository.create(&user).await.unwrap();
+    repository.insert(&user).unwrap();
     cache.prime(&user).await;
     let use_case = UpdateUserUseCase::new(repository, cache.clone(), 60);
 
@@ -342,74 +315,5 @@ impl UserCache for FailingSetCache {
     async fn delete(&self, id: UserId) -> Result<(), CacheError> {
         self.users.lock().unwrap().remove(&id);
         Ok(())
-    }
-}
-
-struct StaleReadRepository {
-    stale: Mutex<Option<User>>,
-    stored: Mutex<Option<User>>,
-}
-
-impl Default for StaleReadRepository {
-    fn default() -> Self {
-        Self {
-            stale: Mutex::new(None),
-            stored: Mutex::new(None),
-        }
-    }
-}
-
-impl StaleReadRepository {
-    fn seed(&self, user: User) {
-        let mut modified = user.clone();
-        modified.update_profile(
-            Email::parse("concurrent@example.com").unwrap(),
-            DisplayName::parse("Concurrent Edit").unwrap(),
-        );
-        *self.stale.lock().unwrap() = Some(user);
-        *self.stored.lock().unwrap() = Some(modified);
-    }
-}
-
-#[async_trait]
-impl UserRepository for StaleReadRepository {
-    async fn create(&self, _user: &User) -> Result<User, RepositoryError> {
-        unimplemented!()
-    }
-
-    async fn find_by_id(&self, _id: UserId) -> Result<Option<User>, RepositoryError> {
-        Ok(self.stale.lock().unwrap().clone())
-    }
-
-    async fn list(&self, _limit: u32, _offset: u64) -> Result<Vec<User>, RepositoryError> {
-        unimplemented!()
-    }
-
-    async fn update(
-        &self,
-        user: &User,
-        expected_updated_at: &DateTime<Utc>,
-    ) -> Result<User, RepositoryError> {
-        let stored = self.stored.lock().unwrap();
-        match stored.as_ref() {
-            Some(existing) if existing.updated_at() == expected_updated_at => Ok(user.clone()),
-            Some(_) => Err(RepositoryError::Conflict),
-            None => Err(RepositoryError::NotFound),
-        }
-    }
-
-    async fn delete(&self, _id: UserId) -> Result<bool, RepositoryError> {
-        unimplemented!()
-    }
-}
-
-#[async_trait]
-impl UserRegistrationRepository for StaleReadRepository {
-    async fn create_with_job(
-        &self,
-        _user: &User,
-        _job: &UserCreationJob,
-    ) -> Result<User, RepositoryError> {
-        unimplemented!()
     }
 }

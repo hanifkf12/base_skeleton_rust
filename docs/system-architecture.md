@@ -115,7 +115,6 @@ The application owns these primary boundary contracts:
 | `UserRepository` | User CRUD persistence | `PostgresUserRepository` |
 | `UserRegistrationRepository` | Atomic user plus initial-job creation | `PostgresUserRepository` |
 | `UserCache` | Optional cache-aside operations | `RedisUserCache` or `NoOpUserCache` |
-| `TraceContextProvider` | Capture producer trace context | `OpenTelemetryTraceContext` |
 | `AccessTokenVerifier` | Verify a Bearer access token | `OidcAccessTokenVerifier` |
 | `ReadinessCheck` | Report required-dependency readiness | `PostgresReadinessCheck` |
 | `JobQueue` | Durable job lifecycle | `PostgresJobQueue` |
