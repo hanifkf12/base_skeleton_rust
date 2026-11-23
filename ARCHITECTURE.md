@@ -259,7 +259,7 @@ JWKS caching uses two different controls:
 - `OIDC_JWKS_MAX_AGE_SECONDS` is the maximum age at which cached key material remains usable.
 - `OIDC_JWKS_REFRESH_INTERVAL_SECONDS` throttles refresh and retry attempts.
 
-An unknown `kid` or stale cache may trigger refresh. Refresh is single-flight inside a process. Once cached keys are stale, refresh failure must return `authentication_unavailable`; do not fall back to stale keys indefinitely.
+An unknown `kid` or stale cache may trigger a single shared refresh task per process. Cancelling the triggering request does not cancel the fetch. A failed refresh returns `authentication_unavailable` for tokens that require new keys, including during retry cooldown. Fresh cached keys remain usable; stale keys never verify tokens.
 
 The maximum JWKS age must be at least the refresh interval; configuration loading and discovery reject shorter maximum ages. Discovery/JWKS responses are capped at 1 MiB even when chunked. Metadata clients are HTTPS-only unless local insecure HTTP is enabled and never follow redirects; any non-2xx response, including 3xx, fails the fetch. Selected signing keys are decoded when a key set is loaded and indexed by `(kid, algorithm)` for allocation-free key lookup; malformed selected key material rejects the load.
 

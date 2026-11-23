@@ -3,4 +3,6 @@
 # does not enable or compile the MySQL adapter (`cargo tree -i rsa` is empty).
 # RUSTSEC-2023-0071 has no fixed release; keep the weekly audit so this narrow
 # exception can be removed as soon as SQLx stops locking the unused adapter.
-ignore = ["RUSTSEC-2023-0071"]
+# SQLx 0.8 also locks SQLite, but no supported build enables it. SQLx 0.9
+# allows a fixed libsqlite3-sys but needs Rust 1.94; revisit on the next MSRV bump.
+ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0459"]

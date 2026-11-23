@@ -12,7 +12,10 @@ use jsonwebtoken::{
     jwk::{AlgorithmParameters, Jwk, JwkSet, KeyOperations, PublicKeyUse},
 };
 use serde::Deserialize;
-use tokio::sync::{Mutex, RwLock};
+use tokio::{
+    sync::{Mutex, RwLock},
+    task::JoinHandle,
+};
 
 use crate::{
     application::auth::{
@@ -48,17 +51,34 @@ struct AccessTokenClaims {
 }
 
 pub struct OidcAccessTokenVerifier {
-    client: reqwest::Client,
     issuer: String,
     audience: String,
-    allowed_algorithms: HashSet<Algorithm>,
-    jwks_uri: String,
-    keys: RwLock<CachedKeys>,
+    jwks: Arc<Jwks>,
     refresh: Mutex<RefreshState>,
     refresh_interval: Duration,
     jwks_max_age: Duration,
     clock_skew_seconds: u64,
     max_token_lifetime_seconds: u64,
+}
+
+struct Jwks {
+    client: reqwest::Client,
+    uri: String,
+    allowed_algorithms: HashSet<Algorithm>,
+    keys: RwLock<CachedKeys>,
+}
+
+impl Jwks {
+    async fn reload(&self) -> Result<()> {
+        let keys = fetch_json::<JwkSet>(&self.client, &self.uri).await?;
+        let index = index_keys(&keys, &self.allowed_algorithms)
+            .context("OIDC JWKS contains invalid signing keys")?;
+        *self.keys.write().await = CachedKeys {
+            index,
+            fetched_at: Instant::now(),
+        };
+        Ok(())
+    }
 }
 
 struct CachedKeys {
@@ -75,7 +95,25 @@ impl CachedKeys {
 #[derive(Default)]
 struct RefreshState {
     last_attempt: Option<Instant>,
+    task: Option<JoinHandle<Result<()>>>,
+    failed: bool,
 }
+
+impl RefreshState {
+    async fn finish(&mut self) {
+        if let Some(task) = &mut self.task {
+            self.failed = match task.await {
+                Ok(result) => result.is_err(),
+                Err(error) => {
+                    tracing::error!(error = %error, "OIDC JWKS refresh task failed");
+                    true
+                }
+            };
+            self.task = None;
+        }
+    }
+}
+
 impl OidcAccessTokenVerifier {
     pub async fn discover(config: &OidcConfig) -> Result<Arc<Self>> {
         config.validate()?;
@@ -117,14 +155,16 @@ impl OidcAccessTokenVerifier {
         let index = index_keys(&keys, &allowed_algorithms)?;
 
         Ok(Arc::new(Self {
-            client,
             issuer: metadata.issuer,
             audience: config.audience.clone(),
-            allowed_algorithms,
-            jwks_uri: metadata.jwks_uri,
-            keys: RwLock::new(CachedKeys {
-                index,
-                fetched_at: Instant::now(),
+            jwks: Arc::new(Jwks {
+                client,
+                uri: metadata.jwks_uri,
+                allowed_algorithms,
+                keys: RwLock::new(CachedKeys {
+                    index,
+                    fetched_at: Instant::now(),
+                }),
             }),
             refresh: Mutex::new(RefreshState::default()),
             refresh_interval: Duration::from_secs(config.jwks_refresh_interval_seconds),
@@ -134,68 +174,58 @@ impl OidcAccessTokenVerifier {
         }))
     }
 
+    async fn fresh_key(&self, kid: &str, algorithm: Algorithm) -> Option<Arc<DecodingKey>> {
+        let keys = self.jwks.keys.read().await;
+        if keys.fetched_at.elapsed() < self.jwks_max_age {
+            keys.key(kid, algorithm)
+        } else {
+            None
+        }
+    }
+
     async fn key_for(
         &self,
         kid: &str,
         algorithm: Algorithm,
     ) -> Result<Arc<DecodingKey>, AccessTokenVerificationError> {
-        {
-            let keys = self.keys.read().await;
-            if keys.fetched_at.elapsed() < self.jwks_max_age
-                && let Some(key) = keys.key(kid, algorithm)
-            {
-                return Ok(key);
-            }
+        if let Some(key) = self.fresh_key(kid, algorithm).await {
+            return Ok(key);
         }
 
         let mut refresh = self.refresh.lock().await;
-        let cache_is_stale = {
-            let keys = self.keys.read().await;
-            if keys.fetched_at.elapsed() < self.jwks_max_age {
-                if let Some(key) = keys.key(kid, algorithm) {
-                    return Ok(key);
-                }
-                false
-            } else {
-                true
-            }
-        };
-        if refresh
-            .last_attempt
-            .is_some_and(|last_attempt| last_attempt.elapsed() < self.refresh_interval)
-        {
-            return Err(if cache_is_stale {
-                AccessTokenVerificationError::AuthenticationUnavailable
-            } else {
-                AccessTokenVerificationError::InvalidToken
-            });
+        if let Some(key) = self.fresh_key(kid, algorithm).await {
+            return Ok(key);
         }
+        if refresh.task.as_ref().is_some_and(JoinHandle::is_finished) {
+            refresh.finish().await;
+        }
+        if refresh.task.is_none()
+            && refresh
+                .last_attempt
+                .is_none_or(|last_attempt| last_attempt.elapsed() >= self.refresh_interval)
+        {
+            let jwks = Arc::clone(&self.jwks);
+            refresh.last_attempt = Some(Instant::now());
+            // Keep the handle in shared state so cancelling a waiter cannot cancel
+            // the refresh or lose its outcome.
+            refresh.task = Some(tokio::spawn(async move {
+                jwks.reload().await.inspect_err(|error| {
+                    tracing::error!(error = %error, "OIDC JWKS refresh failed");
+                })
+            }));
+        }
+        refresh.finish().await;
 
-        refresh.last_attempt = Some(Instant::now());
-        let keys = match fetch_json::<JwkSet>(&self.client, &self.jwks_uri).await {
-            Ok(keys) => keys,
-            Err(error) => {
-                tracing::error!(error = %error, "OIDC JWKS refresh failed");
-                return Err(AccessTokenVerificationError::AuthenticationUnavailable);
+        let keys = self.jwks.keys.read().await;
+        if keys.fetched_at.elapsed() < self.jwks_max_age {
+            if let Some(key) = keys.key(kid, algorithm) {
+                return Ok(key);
             }
-        };
-        let index = match index_keys(&keys, &self.allowed_algorithms) {
-            Ok(index) => index,
-            Err(error) => {
-                tracing::error!(error = %error, "OIDC JWKS refresh contains invalid signing keys");
-                return Err(AccessTokenVerificationError::AuthenticationUnavailable);
+            if !refresh.failed {
+                return Err(AccessTokenVerificationError::InvalidToken);
             }
-        };
-
-        let key = index
-            .get(&algorithm)
-            .and_then(|keys| keys.get(kid))
-            .cloned();
-        *self.keys.write().await = CachedKeys {
-            index,
-            fetched_at: Instant::now(),
-        };
-        key.ok_or(AccessTokenVerificationError::InvalidToken)
+        }
+        Err(AccessTokenVerificationError::AuthenticationUnavailable)
     }
 }
 
@@ -206,7 +236,7 @@ impl AccessTokenVerifier for OidcAccessTokenVerifier {
         access_token: &str,
     ) -> Result<AuthenticatedPrincipal, AccessTokenVerificationError> {
         let header = decode_header(access_token).map_err(AccessTokenVerificationError::from)?;
-        if !self.allowed_algorithms.contains(&header.alg) {
+        if !self.jwks.allowed_algorithms.contains(&header.alg) {
             return Err(AccessTokenVerificationError::InvalidToken);
         }
         let kid = header
@@ -701,6 +731,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refresh_survives_cancellation_of_the_request_that_started_it() {
+        let provider = TestProvider::start("initial").await;
+        let verifier = OidcAccessTokenVerifier::discover(&provider.config)
+            .await
+            .unwrap();
+        provider.rotate_to("rotated").await;
+        let token = sign("rotated", &valid_claims(&provider.config.issuer_url));
+        let pending_response = provider.state.jwks.write().await;
+        let request = tokio::spawn({
+            let verifier = Arc::clone(&verifier);
+            let token = token.clone();
+            async move { verifier.verify(&token).await }
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while provider.state.jwks_requests.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        drop(pending_response);
+
+        verifier.verify(&token).await.unwrap();
+        assert_eq!(provider.state.jwks_requests.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
     async fn stale_same_kid_refresh_is_single_flight() {
         let provider = TestProvider::start("initial").await;
         let mut config = provider.config.clone();
@@ -708,7 +768,7 @@ mod tests {
         config.jwks_refresh_interval_seconds = 1;
         let verifier = OidcAccessTokenVerifier::discover(&config).await.unwrap();
         let token = sign("initial", &valid_claims(&config.issuer_url));
-        verifier.keys.write().await.fetched_at = Instant::now() - Duration::from_secs(2);
+        verifier.jwks.keys.write().await.fetched_at = Instant::now() - Duration::from_secs(2);
 
         let mut tasks = tokio::task::JoinSet::new();
         for _ in 0..8 {
@@ -732,10 +792,12 @@ mod tests {
         provider.task.abort();
         let _ = provider.task.await;
 
-        assert_eq!(
-            verifier.verify(&sign("rotated", &claims)).await,
-            Err(AccessTokenVerificationError::AuthenticationUnavailable)
-        );
+        for _ in 0..2 {
+            assert_eq!(
+                verifier.verify(&sign("rotated", &claims)).await,
+                Err(AccessTokenVerificationError::AuthenticationUnavailable)
+            );
+        }
         verifier.verify(&sign("initial", &claims)).await.unwrap();
     }
 
@@ -747,7 +809,7 @@ mod tests {
         config.jwks_refresh_interval_seconds = 1;
         let verifier = OidcAccessTokenVerifier::discover(&config).await.unwrap();
         let claims = valid_claims(&config.issuer_url);
-        verifier.keys.write().await.fetched_at = Instant::now() - Duration::from_secs(2);
+        verifier.jwks.keys.write().await.fetched_at = Instant::now() - Duration::from_secs(2);
         provider.task.abort();
         let _ = provider.task.await;
 
@@ -854,7 +916,7 @@ mod tests {
                 Err(AccessTokenVerificationError::AuthenticationUnavailable)
             );
             verifier.verify(&sign("initial", &claims)).await.unwrap();
-            verifier.keys.write().await.fetched_at =
+            verifier.jwks.keys.write().await.fetched_at =
                 Instant::now() - Duration::from_secs(provider.config.jwks_max_age_seconds + 1);
             assert_eq!(
                 verifier.verify(&sign("initial", &claims)).await,

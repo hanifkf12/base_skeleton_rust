@@ -9,6 +9,7 @@ ignore = [
   # opentelemetry-prometheus-text-exporter. Re-evaluate when the exporter
   # switches away from smartstring.
   { id = "RUSTSEC-2026-0249", reason = "smartstring unmaintained, transitive, no fix available" },
+  { id = "RUSTSEC-2026-0543", reason = "maintenance advisory only; no fixed release. Retain Chrono for existing API/cache timestamp compatibility until that type is migrated." },
 ]
 
 [bans]

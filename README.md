@@ -145,6 +145,8 @@ cargo run -- all
 
 `docker compose up` starts PostgreSQL, Redis, and a local Keycloak with a `demo` realm pre-configured for this API (`keycloak/demo-realm.json`: `base-skeleton-api` audience, `postman-local` PKCE client, `users:read`/`users:write` scopes). The `.env.example` OIDC values work against it as-is; admin console is at http://localhost:8081 (`admin`/`admin`). For a real identity provider, replace the example OIDC values by following [Set up authorization](#set-up-authorization).
 
+Compose publishes all three dependency ports on IPv4 loopback (`127.0.0.1`) only. If a port is taken, change the host port while keeping the loopback address.
+
 `all` runs HTTP and the worker in one process for local or simple deployments. To run them as independently scalable production processes:
 
 ```bash
@@ -269,6 +271,8 @@ This service validates externally issued JWT access tokens; it does not store pa
 For a complete local Keycloak and Postman walkthrough, see [Keycloak Setup Guide](docs/keycloak-setup.md).
 
 At HTTP startup, the service loads discovery metadata and the initial JWKS. Startup fails if either is unavailable or invalid. Each document is limited to 1 MiB, including responses without `Content-Length` or with chunked transfer encoding. Unless insecure HTTP is explicitly allowed, the configured issuer, discovered issuer, and JWKS URI must use HTTPS; cross-host JWKS URLs remain supported. Metadata requests do not follow redirects, so a 3xx response fails. Signing keys are decoded once per key-set load and cached by key ID and algorithm; malformed selected signing keys reject startup or refresh. An unknown `kid` triggers at most one refresh per configured interval. Once the cache reaches `OIDC_JWKS_MAX_AGE_SECONDS`, refresh is mandatory even for an unchanged `kid`; a failure returns `503 authentication_unavailable` and stale key material is not used. The refresh interval throttles retries to protect the provider.
+
+Concurrent requests share one in-flight JWKS refresh. It runs until completion or the OIDC HTTP timeout even if the request that triggered it is cancelled. During retry cooldown, fresh known keys still work; a key that requires a failed refresh gets `503`, while a key absent from a successfully refreshed set gets `401`.
 
 Tokens must have a signature from a discovered signing key, an allowed algorithm, matching `iss` and `aud`, valid `exp`, required `iat`, and optional `nbf` timestamps, a non-empty `sub`, and a standard space-delimited `scope` claim. Future `iat` outside clock skew and excessive token lifetime are rejected. Authentication failures use the existing JSON error envelope plus a `WWW-Authenticate: Bearer` challenge.
 

@@ -529,7 +529,7 @@ The key cache has two independent timers:
 
 The maximum age must be greater than or equal to the refresh interval; shorter maximum ages fail validation before discovery. Each discovery/JWKS document is capped at 1 MiB regardless of transfer encoding. Production HTTP clients enforce HTTPS, never follow redirects, and still allow cross-host JWKS URLs. Usable keys are decoded on load and indexed by `(kid, algorithm)`, not rebuilt for each token; malformed selected signing keys reject startup or refresh.
 
-Fresh cached keys continue to verify tokens during a temporary provider outage. Once stale, refresh is mandatory even if `kid` has not changed. Failed stale refresh returns `503 authentication_unavailable`; stale keys are not used indefinitely. A mutex provides single-flight refresh so concurrent requests do not stampede the provider.
+Fresh cached keys continue to verify tokens during a temporary provider outage. Once stale, refresh is mandatory even if `kid` has not changed. One shared refresh task survives cancellation of its initiating request. While retry is throttled after a failure, tokens requiring refresh get `503 authentication_unavailable`. A key missing after a successful refresh gets `401`.
 
 ### Scope policy
 
@@ -1015,7 +1015,7 @@ Every push and pull request, plus a weekly schedule, runs:
 5. RustSec `cargo audit`.
 6. Production Docker image build.
 
-The weekly run detects advisories even when source dependencies have not changed. `.cargo/audit.toml` documents the narrowly scoped advisory exception for an unused SQLx MySQL adapter locked by SQLx macros.
+The weekly run detects advisories even when source dependencies have not changed. `.cargo/audit.toml` records exceptions for unused SQLx drivers retained in the lockfile; `cargo deny` also checks the resolved dependency graph. Its Chrono exception is for an unmaintained advisory, not a vulnerability.
 
 ## How to extend the system
 
